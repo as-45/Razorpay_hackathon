@@ -7,4 +7,4 @@ client = razorpay.Client(auth=(os.getenv("RZP_KEY_ID"),
 
 link = client.payment_link.fetch(sys.argv[1])
 print("STATUS      :", link["status"])
-print("AMOUNT PAID :", link.get("amount_paid"))clear
+print("AMOUNT PAID :", link.get("amount_paid"))
