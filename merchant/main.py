@@ -18,6 +18,8 @@ app = FastAPI(title="Sharma Sweets — merchant API")
 def agent_manifest():
     return {
         "merchant": "Sharma Sweets",
+        "description": "Indian sweets and gift boxes, Bangalore. City delivery only.",
+        "established": 1987,
         "currency": "INR",
         "amounts": "integer paise",
         "endpoints": {
@@ -29,7 +31,7 @@ def agent_manifest():
         "mandate_required": True,
         "categories": ["sweets", "premium", "addons"]
     }
-    
+
 class Line(BaseModel):
     id: str
     qty: int
