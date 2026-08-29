@@ -13,6 +13,23 @@ from .audit import log
 Base.metadata.create_all(engine)
 app = FastAPI(title="Sharma Sweets — merchant API")
 
+
+@app.get("/.well-known/agent-catalog")
+def agent_manifest():
+    return {
+        "merchant": "Sharma Sweets",
+        "currency": "INR",
+        "amounts": "integer paise",
+        "endpoints": {
+            "catalog": "GET /catalog",
+            "quote":   "POST /quote",
+            "order":   "POST /orders   (requires mandate_id)",
+            "audit":   "GET /audit/{trace_id}"
+        },
+        "mandate_required": True,
+        "categories": ["sweets", "premium", "addons"]
+    }
+    
 class Line(BaseModel):
     id: str
     qty: int
