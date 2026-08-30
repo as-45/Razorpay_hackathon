@@ -10,6 +10,14 @@ from .mandate import sign, verify
 from .db import get_db, Base, engine
 from .audit import log
 
+import os, razorpay
+from dotenv import load_dotenv
+
+load_dotenv()
+rzp = razorpay.Client(auth=(os.getenv("RZP_KEY_ID"),
+                            os.getenv("RZP_KEY_SECRET")))
+
+
 Base.metadata.create_all(engine)
 app = FastAPI(title="Sharma Sweets — merchant API")
 
@@ -174,3 +182,55 @@ def create_order(req: OrderRequest, db: Session = Depends(get_db)):
     db.commit()
     log(db, req.trace_id, "merchant", "order_created", "ok", oid, total)
     return {"order_id": oid, "total_paise": total, "lines": lines}
+
+
+
+@app.post("/orders/{order_id}/pay")
+def pay_order(order_id: str, db: Session = Depends(get_db)):
+    o = db.get(Order, order_id)
+    if o is None:
+        raise HTTPException(404, "unknown_order")
+
+    # idempotency: one order, one payment link, ever
+    if o.payment_link_id:
+        log(db, o.trace_id, "merchant", "pay_reused", "ok",
+            f"link already exists for {o.id}", o.total_paise)
+        return {"order_id": o.id, "payment_url": o.payment_url,
+                "status": o.status, "reused": True}
+
+    link = rzp.payment_link.create({
+        "amount": o.total_paise,
+        "currency": "INR",
+        "description": f"Order {o.id}",
+        "reference_id": o.id,
+        "notify": {"sms": False, "email": False},
+    })
+
+    o.payment_link_id = link["id"]
+    o.payment_url     = link["short_url"]
+    o.status          = "awaiting_payment"
+    db.commit()
+
+    log(db, o.trace_id, "merchant", "payment_link_created", "ok",
+        link["id"], o.total_paise)
+    return {"order_id": o.id, "payment_url": o.payment_url,
+            "status": o.status, "reused": False}
+
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: str, db: Session = Depends(get_db)):
+    o = db.get(Order, order_id)
+    if o is None:
+        raise HTTPException(404, "unknown_order")
+
+    if o.payment_link_id and o.status != "paid":
+        link = rzp.payment_link.fetch(o.payment_link_id)
+        if link["status"] == "paid":
+            o.status = "paid"
+            db.commit()
+            log(db, o.trace_id, "merchant", "payment_captured", "ok",
+                o.payment_link_id, o.total_paise)
+
+    return {"order_id": o.id, "status": o.status,
+            "total_paise": o.total_paise, "items": o.items,
+            "payment_url": o.payment_url}
