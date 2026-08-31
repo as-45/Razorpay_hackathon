@@ -20,7 +20,9 @@ rzp = razorpay.Client(auth=(os.getenv("RZP_KEY_ID"),
 
 Base.metadata.create_all(engine)
 app = FastAPI(title="Sharma Sweets — merchant API")
-
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/.well-known/agent-catalog")
 def agent_manifest():

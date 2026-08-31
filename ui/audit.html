@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Audit trail — Sharma Sweets</title>
+<style>
+  body { font: 14px/1.5 ui-monospace, Consolas, monospace;
+         max-width: 860px; margin: 40px auto; padding: 0 20px;
+         background: #0f1115; color: #d8dee9; }
+  h1 { font-size: 18px; font-weight: 600; }
+  input, button { font: inherit; padding: 6px 10px; background: #1b1f27;
+                  color: #d8dee9; border: 1px solid #333a45; border-radius: 4px; }
+  button { cursor: pointer; }
+  .row { display: grid; grid-template-columns: 90px 90px 1fr 110px;
+         gap: 12px; padding: 10px 12px; border-left: 3px solid #3b4252;
+         margin: 6px 0; background: #161a21; align-items: baseline; }
+  .ok      { border-left-color: #6fbf73; }
+  .refused { border-left-color: #d96c6c; background: #241a1a; }
+  .actor   { color: #7aa2f7; }
+  .time    { color: #6b7280; font-size: 12px; }
+  .amt     { text-align: right; color: #e0c07a; }
+  .step    { color: #cbd5e1; }
+  .reason  { color: #9aa5b1; }
+  .empty   { color: #6b7280; padding: 20px 0; }
+</style>
+</head>
+<body>
+<h1>Audit trail</h1>
+<p>
+  <input id="trace" placeholder="trace id, e.g. agt_353e738a" size="30">
+  <button onclick="load()">Load</button>
+</p>
+<div id="out"></div>
+
+<script>
+async function load() {
+  const id  = document.getElementById('trace').value.trim();
+  const out = document.getElementById('out');
+  if (!id) return;
+  out.innerHTML = '<div class="empty">loading…</div>';
+  try {
+    const res  = await fetch(`http://127.0.0.1:8000/audit/${id}`);
+    const rows = await res.json();
+    if (!rows.length) {
+      out.innerHTML = '<div class="empty">no rows for that trace</div>';
+      return;
+    }
+    out.innerHTML = rows.map(r => `
+      <div class="row ${r.decision}">
+        <span class="time">${r.at.slice(11,19)}</span>
+        <span class="actor">${r.actor}</span>
+        <span><span class="step">${r.step}</span><br>
+              <span class="reason">${r.reason || ''}</span></span>
+        <span class="amt">${r.amount_paise
+            ? 'Rs ' + (r.amount_paise/100).toFixed(0) : ''}</span>
+      </div>`).join('');
+  } catch (e) {
+    out.innerHTML = '<div class="empty">could not reach the merchant</div>';
+  }
+}
+setInterval(() => { if (document.getElementById('trace').value) load(); }, 2000);
+</script>
+</body>
+</html>
