@@ -234,3 +234,16 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
     return {"order_id": o.id, "status": o.status,
             "total_paise": o.total_paise, "items": o.items,
             "payment_url": o.payment_url}
+
+class AuditRequest(BaseModel):
+    trace_id: str
+    step: str
+    decision: str
+    reason: str = ""
+    amount_paise: int | None = None
+
+@app.post("/audit")
+def write_audit(req: AuditRequest, db: Session = Depends(get_db)):
+    log(db, req.trace_id, "agent", req.step, req.decision,
+        req.reason, req.amount_paise)
+    return {"ok": True}
