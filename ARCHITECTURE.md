@@ -11,39 +11,38 @@ no access to the merchant's database or code.
 
 ```mermaid
 flowchart TB
-    U["User: '2 boxes kaju katli, under Rs 2000'"]
+    U["User: 2 boxes kaju katli, under Rs 2000"]
 
-    subgraph AGENT["Shopper agent — LangGraph (buyer's side)"]
-        A["parse → fetch → screen → select<br/>→ quote → precheck → approval → pay"]
+    subgraph AGENT["Shopper agent - LangGraph, buyer side"]
+        A["parse, fetch, screen, select, quote, precheck, approval, pay"]
     end
 
-    subgraph MERCH["Merchant API — FastAPI (shop's side)"]
-        M0["GET /.well-known/agent-catalog"]
+    subgraph MERCH["Merchant API - FastAPI, shop side"]
         M1["GET /catalog"]
-        M2["POST /quote — merchant prices it"]
-        M3{"POST /orders — MANDATE GATE"}
-        M4["POST /orders/id/pay — idempotent"]
-        M5["GET /orders/id — poll"]
+        M2["POST /quote - merchant prices it"]
+        M3{"POST /orders - MANDATE GATE"}
+        M4["POST /orders/id/pay - idempotent"]
+        M5["GET /orders/id - poll"]
     end
 
     RZP[("Razorpay test mode")]
     DB[("sweets.db")]
-    AUD[["Audit trail — both actors"]]
+    AUD["Audit trail - both actors"]
+    MX["403, reason logged"]
 
     U --> A
-    A -.->|http| M1
-    A -.->|http| M2
-    A -.->|http| M3
-    M3 -->|6 checks pass| M4
-    M3 -->|any check fails| MX["403, reason logged"]
+    A --> M1
+    A --> M2
+    A --> M3
+    M3 -->|six checks pass| M4
+    M3 -->|any check fails| MX
     M4 --> RZP
     RZP --> M5
     M5 --> A
-
     M1 --- DB
     M3 --- DB
-    AGENT -.-> AUD
-    MERCH -.-> AUD
+    A --> AUD
+    M3 --> AUD
 ```
 
 ## Agent graph
@@ -52,36 +51,33 @@ Generated from the code with `graph.get_graph().draw_mermaid()`.
 
 ```mermaid
 graph TD;
-        __start__([__start__]):::first
-        parse(parse)
-        fetch(fetch)
-        screen(screen)
-        select(select)
-        quote(quote)
-        precheck(precheck)
-        approval(approval)
-        pay(pay)
-        confirm(confirm)
-        refuse(refuse)
-        __end__([__end__]):::last
-        __start__ --> parse;
-        parse --> fetch;
-        fetch --> screen;
-        screen --> select;
-        select -.-> quote;
-        select -.-> refuse;
-        quote --> precheck;
-        precheck -.-> approval;
-        precheck -.-> refuse;
-        approval -.-> pay;
-        approval -.-> refuse;
-        pay -.-> confirm;
-        pay -.-> refuse;
-        confirm --> __end__;
-        refuse --> __end__;
-        classDef default fill:#f2f0ff,line-height:1.2
-        classDef first fill-opacity:0
-        classDef last fill:#bfb6fc
+    start([start]);
+    parse(parse);
+    fetch(fetch);
+    screen(screen);
+    select(select);
+    quote(quote);
+    precheck(precheck);
+    approval(approval);
+    pay(pay);
+    confirm(confirm);
+    refuse(refuse);
+    finish([end]);
+    start --> parse;
+    parse --> fetch;
+    fetch --> screen;
+    screen --> select;
+    select -.-> quote;
+    select -.-> refuse;
+    quote --> precheck;
+    precheck -.-> approval;
+    precheck -.-> refuse;
+    approval -.-> pay;
+    approval -.-> refuse;
+    pay -.-> confirm;
+    pay -.-> refuse;
+    confirm --> finish;
+    refuse --> finish;
 ```
 
 Four of the nine nodes can route to `refuse`. Every one of them writes
