@@ -5,11 +5,11 @@ class ShopState(TypedDict, total=False):
     trace_id:       str
     mandate_id:     str
     cap_paise:      int            # agent's own copy, for fast-fail
-
+    parsed:        dict           # parsed instruction, e.g. budget
     catalog:        list           # raw from merchant
     screened:       list           # after guards.py cleans it
     findings:       list           # suspicious content found
-
+    allowed_categories: list  
     selection:      list           # [{"id": "...", "qty": n}]
     quote:          dict           # merchant's authoritative total
 

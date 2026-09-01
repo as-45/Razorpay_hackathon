@@ -249,3 +249,19 @@ def write_audit(req: AuditRequest, db: Session = Depends(get_db)):
     log(db, req.trace_id, "agent", req.step, req.decision,
         req.reason, req.amount_paise)
     return {"ok": True}
+
+
+
+
+
+
+
+
+@app.get("/mandates/{mandate_id}")
+def read_mandate(mandate_id: str, db: Session = Depends(get_db)):
+    m = db.get(Mandate, mandate_id)
+    if m is None:
+        raise HTTPException(404, "unknown_mandate")
+    return {"mandate_id": m.id, "max_amount_paise": m.max_amount_paise,
+            "allowed_categories": m.allowed_categories,
+            "expires_at": m.expires_at.isoformat(), "status": m.status}

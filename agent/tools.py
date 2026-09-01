@@ -42,3 +42,10 @@ def push_audit(trace_id, step, decision, reason="", amount_paise=None):
                             "amount_paise": amount_paise})
     except Exception:
         pass   # audit must never break the purchase
+
+
+
+def get_mandate(mandate_id):
+    r = requests.get(f"{BASE}/mandates/{mandate_id}", timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
