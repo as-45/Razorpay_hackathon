@@ -1,6 +1,7 @@
 import sys, uuid
 from langgraph.types import Command
 from .graph import build
+from . import tools
 
 def main():
     instruction = sys.argv[1] if len(sys.argv) > 1 else \
@@ -19,12 +20,22 @@ def main():
     print(f"\ntrace: {trace_id}\n")
     result = graph.invoke(state, config)
 
-    # paused at the approval gate?
-    if "__interrupt__" in result:
-        ask = result["__interrupt__"][0].value
-        print(f"\n  {ask['summary']}")
-        print(f"  Total: Rs {ask['total_paise']/100:.0f}")
-        answer = input("  Approve? (y/n): ")
+    # the graph can pause more than once
+    while "__interrupt__" in result:
+        ask  = result["__interrupt__"][0].value
+        kind = ask.get("kind")
+
+        if kind == "budget_scope":
+            print(f"\n  {ask['message']}")
+            answer = input("  total / per item: ")
+        elif kind == "over_budget":
+            print(f"\n  {ask['message']}")
+            answer = input("  Continue? (y/n): ")
+        else:
+            print(f"\n  {ask['summary']}")
+            print(f"  Total: Rs {ask['total_paise']/100:.0f}")
+            answer = input("  Approve? (y/n): ")
+
         result = graph.invoke(Command(resume=answer), config)
 
     print("\n--- agent trail ---")

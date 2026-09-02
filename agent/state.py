@@ -19,3 +19,4 @@ class ShopState(TypedDict, total=False):
     status:         str            # running | refused | paid
     refusal_reason: Optional[str]
     notes:          list           # agent-side audit lines
+    budget_scope: str

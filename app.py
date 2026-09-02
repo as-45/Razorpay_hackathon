@@ -6,6 +6,8 @@ MERCHANT = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="Agentic commerce", layout="wide")
 st.title("Agentic commerce — bounded AI shopping")
+st.caption("A merchant an AI buyer can purchase from unattended, with "
+           "spending authority the merchant enforces, not the agent.")
 
 for k in ("graph", "cfg", "trace", "pending", "result", "mandate"):
     st.session_state.setdefault(k, None)
@@ -31,6 +33,12 @@ with left:
         st.success(f"Mandate {st.session_state.mandate} — "
                    f"Rs {cap:,.0f} on {', '.join(cats)}")
 
+    with st.expander("What this merchant sells (machine-readable catalog)"):
+        try:
+            st.json(requests.get(f"{MERCHANT}/catalog").json())
+        except Exception:
+            st.caption("merchant not reachable")
+
     st.subheader("2. Tell the agent what to buy")
     text = st.text_input("Instruction",
                          "2 boxes of kaju katli under Rs 2000",
@@ -38,37 +46,57 @@ with left:
 
     if st.button("Run agent", type="primary", use_container_width=True,
                  disabled=not st.session_state.mandate):
-        st.session_state.trace = f"agt_{uuid.uuid4().hex[:8]}"
-        st.session_state.graph = build()
-        st.session_state.cfg = {"configurable":
-                                {"thread_id": st.session_state.trace}}
-        with st.spinner("agent working — local model, this takes ~30s"):
-            res = st.session_state.graph.invoke({
-                "instruction": text,
-                "trace_id":    st.session_state.trace,
-                "mandate_id":  st.session_state.mandate,
-                "cap_paise":   int(cap * 100),
-                "notes": [], "status": "running"}, st.session_state.cfg)
-        st.session_state.pending = res.get("__interrupt__")
-        st.session_state.result  = res
-        st.rerun()
+        if not text.strip():
+            st.warning("Give the agent an instruction first.")
+        else:
+            st.session_state.trace = f"agt_{uuid.uuid4().hex[:8]}"
+            st.session_state.graph = build()
+            st.session_state.cfg = {"configurable":
+                                    {"thread_id": st.session_state.trace}}
+            with st.spinner("agent working — local model, this takes ~30s"):
+                res = st.session_state.graph.invoke({
+                    "instruction": text,
+                    "trace_id":    st.session_state.trace,
+                    "mandate_id":  st.session_state.mandate,
+                    "cap_paise":   int(cap * 100),
+                    "notes": [], "status": "running"}, st.session_state.cfg)
+            st.session_state.pending = res.get("__interrupt__")
+            st.session_state.result  = res
+            st.rerun()
 
     # ─────────── the gate ───────────
     if st.session_state.pending:
         ask = st.session_state.pending[0].value
         st.divider()
-        if ask.get("kind") == "over_budget":
+        clicked = None
+
+        if ask.get("kind") == "budget_scope":
             st.warning(ask["message"])
+            c1, c2 = st.columns(2)
+            if c1.button("Whole order", type="primary",
+                         use_container_width=True):
+                clicked = "total"
+            if c2.button("Per item", use_container_width=True):
+                clicked = "per item"
+
+        elif ask.get("kind") == "over_budget":
+            st.warning(ask["message"])
+            c1, c2 = st.columns(2)
+            if c1.button("Continue", type="primary",
+                         use_container_width=True):
+                clicked = "y"
+            if c2.button("Stop", use_container_width=True):
+                clicked = "n"
+
         else:
             st.info(f"**{ask.get('summary')}**\n\n"
                     f"Total: Rs {ask.get('total_paise', 0)/100:,.0f}")
-
-        c1, c2 = st.columns(2)
-        clicked = None
-        if c1.button("Approve", type="primary", use_container_width=True):
-            clicked = "y"
-        if c2.button("Decline", use_container_width=True):
-            clicked = "n"
+            c1, c2 = st.columns(2)
+            if c1.button("Approve", type="primary",
+                         use_container_width=True):
+                clicked = "y"
+            if c2.button("Decline", use_container_width=True):
+                clicked = "n"
 
         if clicked:
             with st.spinner("resuming"):

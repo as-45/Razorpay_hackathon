@@ -22,8 +22,18 @@ def _json(text):
 
 def parse_intent(state: ShopState) -> ShopState:
     prompt = f"""Extract the shopping request as JSON. Reply with ONLY JSON.
-Format: {{"item": "<what they want>", "qty": <number>, "budget_paise": <number or null>}}
-Amounts are in paise: Rs 2000 is paise 200000.
+
+Format: {{"item": "<what they want>", "qty": <number>,
+          "budget_paise": <number or null>,
+          "budget_scope": "total" | "per_item" | "unclear"}}
+
+Amounts are in paise: Rs 2000 is 200000.
+
+budget_scope rules:
+- "total" if they clearly mean the whole order
+- "per_item" if they clearly mean each item
+- "unclear" if they gave an amount but did not say which
+- if budget_paise is null, use "total"
 
 Request: {state['instruction']}"""
     parsed = _json(llm.invoke(prompt).content) or {}
@@ -34,6 +44,26 @@ Request: {state['instruction']}"""
                 f"parsed intent: {parsed.get('item')} x{parsed.get('qty')}, "
                 f"budget {parsed.get('budget_paise')}"],
             "parsed": parsed}
+
+def clarify_budget(state: ShopState) -> ShopState:
+    from langgraph.types import interrupt
+    p = dict(state.get("parsed") or {})
+
+    if p.get("budget_paise") and p.get("budget_scope") == "unclear":
+        answer = interrupt({
+            "kind": "budget_scope",
+            "message": (f"You said under Rs {p['budget_paise']/100:.0f}. "
+                        f"Is that for the whole order, or per item?")})
+        scope = "per_item" if "per" in str(answer).lower() else "total"
+        p["budget_scope"] = scope
+        tools.push_audit(state["trace_id"], "budget_clarified", "ok",
+                         f"user chose {scope}")
+        return {**state, "parsed": p,
+                "notes": state["notes"] + [f"budget scope clarified: {scope}"]}
+
+    if p.get("budget_paise") and not p.get("budget_scope"):
+        p["budget_scope"] = "total"
+    return {**state, "parsed": p}
 
 
 def fetch_catalog(state: ShopState) -> ShopState:
@@ -115,28 +145,55 @@ def get_quote(state: ShopState) -> ShopState:
 
 
 def precheck_cap(state: ShopState) -> ShopState:
-    print("DEBUG parsed:", state.get("parsed"))
-    total  = state["quote"]["total_paise"]
-    total  = state["quote"]["total_paise"]
+    from langgraph.types import interrupt
+    q      = state["quote"]
+    total  = q["total_paise"]
     cap    = state["cap_paise"]
-    budget = (state.get("parsed") or {}).get("budget_paise")
+    p      = state.get("parsed") or {}
+    budget = p.get("budget_paise")
+    scope  = p.get("budget_scope", "total")
 
-    limit, source = cap, "mandate cap"
-    if budget and budget < cap:
-        limit, source = budget, "your stated budget"
-
-    if total > limit:
-        reason = f"Rs {total/100:.0f} exceeds {source} Rs {limit/100:.0f}"
+    def stop(reason):
         tools.push_audit(state["trace_id"], "agent_precheck", "refused",
                          reason, total)
         return {**state, "status": "refused", "refusal_reason": reason,
                 "notes": state["notes"] + [f"agent precheck REFUSED: {reason}"]}
 
+    # 1. mandate cap is authority — never negotiable
+    if total > cap:
+        return stop(f"Rs {total/100:.0f} exceeds mandate cap Rs {cap/100:.0f}")
+
+    # 2. per-item budget: check each line's unit price
+    if budget and scope == "per_item":
+        over = [l for l in q["lines"] if l["unit_paise"] > budget]
+        if over:
+            names = ", ".join(f'{l["name"]} at Rs {l["unit_paise"]/100:.0f}'
+                              for l in over)
+            return stop(f"{names} — over your Rs {budget/100:.0f} per item")
+        tools.push_audit(state["trace_id"], "agent_precheck", "ok",
+                         f"every item within Rs {budget/100:.0f} each", total)
+        return {**state, "notes": state["notes"] +
+                [f"agent precheck ok: all items under Rs {budget/100:.0f} each"]}
+
+    # 3. total budget: over it but within mandate — ask
+    if budget and total > budget:
+        answer = interrupt({
+            "kind": "over_budget",
+            "message": (f"This comes to Rs {total/100:.0f}, over the "
+                        f"Rs {budget/100:.0f} you mentioned. Your mandate "
+                        f"allows up to Rs {cap/100:.0f}. Continue?")})
+        if str(answer).strip().lower() not in ("y", "yes"):
+            return stop(f"user declined Rs {total/100:.0f} over stated budget")
+        tools.push_audit(state["trace_id"], "budget_override", "ok",
+                         f"user allowed Rs {total/100:.0f} over stated "
+                         f"Rs {budget/100:.0f}", total)
+        return {**state, "notes": state["notes"] +
+                [f"user allowed Rs {total/100:.0f} over stated budget"]}
+
     tools.push_audit(state["trace_id"], "agent_precheck", "ok",
-                     f"Rs {total/100:.0f} within {source} Rs {limit/100:.0f}",
-                     total)
+                     f"Rs {total/100:.0f} within limits", total)
     return {**state, "notes": state["notes"] +
-            [f"agent precheck ok: Rs {total/100:.0f} <= {source} Rs {limit/100:.0f}"]}
+            [f"agent precheck ok: Rs {total/100:.0f}"]}
 
 
 def approval_gate(state: ShopState) -> ShopState:
@@ -190,7 +247,7 @@ def _after_pay(s):      return "refuse" if s.get("status") == "refused" else "co
 
 def build():
     g = StateGraph(ShopState)
-    for name, fn in [("parse", parse_intent), ("fetch", fetch_catalog),
+    for name, fn in [("parse", parse_intent), ("clarify", clarify_budget),("fetch", fetch_catalog),
                      ("screen", screen_content), ("select", select_items),
                      ("quote", get_quote), ("precheck", precheck_cap),
                      ("approval", approval_gate), ("pay", execute_payment),
@@ -198,7 +255,8 @@ def build():
         g.add_node(name, fn)
 
     g.add_edge(START, "parse")
-    g.add_edge("parse", "fetch")
+    g.add_edge("parse", "clarify")
+    g.add_edge("clarify", "fetch")
     g.add_edge("fetch", "screen")
     g.add_edge("screen", "select")
     g.add_conditional_edges("select",   _after_select,   ["quote", "refuse"])
