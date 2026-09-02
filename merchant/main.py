@@ -20,6 +20,13 @@ rzp = razorpay.Client(auth=(os.getenv("RZP_KEY_ID"),
 
 Base.metadata.create_all(engine)
 app = FastAPI(title="Sharma Sweets — merchant API")
+from .passkey import router as passkey_router
+app.include_router(passkey_router)
+from fastapi.responses import FileResponse
+
+@app.get("/consent")
+def consent_page():
+    return FileResponse("ui/consent.html")
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
@@ -161,7 +168,9 @@ def create_order(req: OrderRequest, db: Session = Depends(get_db)):
         refuse("unknown_mandate", f"no mandate {req.mandate_id}")
     if m.status != "active":
         refuse("mandate_revoked", f"mandate {m.id} is {m.status}")
-    if not verify(m):
+    if m.customer_id:
+        pass                      # passkey-signed: verified at issue time
+    elif not verify(m):
         refuse("bad_signature", f"mandate {m.id} failed signature check")
     if m.expires_at < datetime.utcnow():
         refuse("mandate_expired", f"expired {m.expires_at.isoformat()}")

@@ -35,6 +35,7 @@ class Mandate(Base):
     signature          = Column(String, nullable=False)
     status             = Column(String, default="active")
     parent_mandate_id  = Column(String, nullable=True)
+    customer_id = Column(String, nullable=True)
 
 class Order(Base):
     __tablename__ = "orders"
@@ -48,3 +49,13 @@ class Order(Base):
     payment_url       = Column(String, nullable=True)
     status            = Column(String, default="created")
     created_at        = Column(DateTime, default=datetime.utcnow)
+
+
+
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id            = Column(String, primary_key=True)
+    credential_id = Column(String, nullable=True)
+    public_key    = Column(String, nullable=True)
+    sign_count    = Column(Integer, default=0)

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><title>Approve agent spending</title>
+<style>
+ body{font:15px/1.6 ui-monospace,Consolas,monospace;max-width:560px;
+      margin:60px auto;padding:0 20px;background:#0f1115;color:#d8dee9}
+ .card{background:#161a21;border:1px solid #2a303b;border-radius:8px;padding:20px;margin:18px 0}
+ .row{display:flex;justify-content:space-between;padding:6px 0}
+ .k{color:#6b7280} .v{color:#e0c07a}
+ button{font:inherit;padding:10px 16px;border-radius:6px;border:1px solid #333a45;
+        background:#1b1f27;color:#d8dee9;cursor:pointer;margin-right:8px}
+ button.primary{background:#2d4a2f;border-color:#3d6b40}
+ #out{margin-top:16px;color:#9aa5b1;white-space:pre-wrap}
+ input{font:inherit;background:#1b1f27;color:#d8dee9;border:1px solid #333a45;
+       border-radius:4px;padding:6px 10px;width:90px}
+</style>
+</head>
+<body>
+<h2>Approve agent spending</h2>
+
+<div class="card">
+  <div class="row"><span class="k">customer</span><span class="v">cust_001</span></div>
+  <div class="row"><span class="k">agent</span><span class="v">agt_001</span></div>
+  <div class="row"><span class="k">limit</span>
+      <span><input id="cap" type="number" value="2000"> Rs</span></div>
+  <div class="row"><span class="k">categories</span><span class="v">sweets</span></div>
+  <div class="row"><span class="k">valid for</span><span class="v">7 days</span></div>
+</div>
+
+<button onclick="register()">1. Register passkey</button>
+<button class="primary" onclick="approve()">2. Approve with passkey</button>
+<div id="out"></div>
+
+<script>
+const API = "http://localhost:8000";
+const CUST = "cust_001", AGENT = "agt_001", CATS = ["sweets"];
+const say = t => document.getElementById("out").textContent = t;
+
+const d = s => Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")
+              .padEnd(s.length + (4 - s.length % 4) % 4, "=")), c => c.charCodeAt(0));
+const e = b => btoa(String.fromCharCode(...new Uint8Array(b)))
+              .replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+
+async function register() {
+  say("requesting options…");
+  const o = await (await fetch(`${API}/webauthn/register/begin`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({customer_id: CUST})})).json();
+
+  o.challenge = d(o.challenge);
+  o.user.id   = d(o.user.id);
+
+  const cred = await navigator.credentials.create({publicKey: o});
+  const res  = await (await fetch(`${API}/webauthn/register/complete`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({customer_id: CUST, credential: pack(cred, true)})})).json();
+  say(JSON.stringify(res, null, 2));
+}
+
+async function approve() {
+  const cap = parseInt(document.getElementById("cap").value) * 100;
+  say("waiting for passkey…");
+
+  const begin = await (await fetch(`${API}/webauthn/mandate/begin`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({customer_id: CUST, agent_id: AGENT,
+      max_amount_paise: cap, allowed_categories: CATS, valid_days: 7})})).json();
+
+  const o = begin.options;
+  o.challenge = d(o.challenge);
+  o.allowCredentials = (o.allowCredentials||[]).map(c => ({...c, id: d(c.id)}));
+
+  const cred = await navigator.credentials.get({publicKey: o});
+  const res  = await (await fetch(`${API}/webauthn/mandate/complete`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({customer_id: CUST, agent_id: AGENT,
+      max_amount_paise: cap, allowed_categories: CATS,
+      expires_at: begin.expires_at, credential: pack(cred, false)})})).json();
+  say(JSON.stringify(res, null, 2));
+}
+
+function pack(c, isReg) {
+  const r = c.response;
+  return {
+    id: c.id, rawId: e(c.rawId), type: c.type,
+    response: isReg
+      ? {clientDataJSON: e(r.clientDataJSON),
+         attestationObject: e(r.attestationObject)}
+      : {clientDataJSON: e(r.clientDataJSON),
+         authenticatorData: e(r.authenticatorData),
+         signature: e(r.signature),
+         userHandle: r.userHandle ? e(r.userHandle) : null}
+  };
+}
+</script>
+</body>
+</html>
