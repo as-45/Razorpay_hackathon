@@ -1,8 +1,9 @@
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-engine = create_engine("sqlite:///sweets.db",
-                       connect_args={"check_same_thread": False})
+DB_URL = os.getenv("DB_URL", "sqlite:///sweets.db")
+engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
 Base = declarative_base()
 
