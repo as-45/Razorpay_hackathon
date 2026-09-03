@@ -1,7 +1,7 @@
 import uuid, requests, streamlit as st
 from langgraph.types import Command
 from agent.graph import build
-
+from streamlit_mic_recorder import mic_recorder
 MERCHANT = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="Agentic commerce", layout="wide")
@@ -9,7 +9,8 @@ st.title("Agentic commerce — bounded AI shopping")
 st.caption("A merchant an AI buyer can purchase from unattended, with "
            "spending authority the merchant enforces, not the agent.")
 
-for k in ("graph", "cfg", "trace", "pending", "result", "mandate"):
+for k in ("graph", "cfg", "trace", "pending", "result", "mandate",
+          "last_audio_id"):
     st.session_state.setdefault(k, None)
 
 left, right = st.columns([1, 1], gap="large")
@@ -34,15 +35,34 @@ with left:
                    f"Rs {cap:,.0f} on {', '.join(cats)}")
 
     with st.expander("What this merchant sells (machine-readable catalog)"):
-        try:
+        if st.button("Load catalog"):
             st.json(requests.get(f"{MERCHANT}/catalog").json())
-        except Exception:
-            st.caption("merchant not reachable")
 
     st.subheader("2. Tell the agent what to buy")
-    text = st.text_input("Instruction",
-                         "2 boxes of kaju katli under Rs 2000",
-                         label_visibility="collapsed")
+    st.session_state.setdefault("spoken","2 boxes of kaju katli under Rs 2000")
+    audio = mic_recorder(start_prompt="🎤 Speak instead",stop_prompt="⏹ Stop", key="voice")
+
+    if audio and audio.get("bytes") and \
+       audio.get("id") != st.session_state.get("last_audio_id"):
+        st.session_state.last_audio_id = audio.get("id")
+        with st.spinner("transcribing"):
+            if "whisper" not in st.session_state:
+                from faster_whisper import WhisperModel
+                st.session_state.whisper = WhisperModel(
+                    "base", device="cpu", compute_type="int8")
+            with open("temp_voice.wav", "wb") as f:
+                f.write(audio["bytes"])
+            segs, _ = st.session_state.whisper.transcribe(
+                "temp_voice.wav", language="en")
+            heard = " ".join(s.text for s in segs).strip()
+        if heard:
+            st.session_state.spoken = heard
+            st.rerun()
+
+    text = st.text_input("Instruction", st.session_state.spoken,
+                         label_visibility="collapsed",
+                         help="Type it, or use the mic above. "
+                              "You can edit what was heard.")
 
     if st.button("Run agent", type="primary", use_container_width=True,
                  disabled=not st.session_state.mandate):
