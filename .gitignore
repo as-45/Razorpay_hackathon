@@ -1,3 +1,14 @@
+# secrets
 .env
+
+# python
 .venv/
 __pycache__/
+*.pyc
+
+# runtime artifacts — regenerated on every run, never committed
+temp_voice.wav
+*.db
+
+# local scratch
+app_backup.py
