@@ -20,3 +20,4 @@ class ShopState(TypedDict, total=False):
     refusal_reason: Optional[str]
     notes:          list           # agent-side audit lines
     budget_scope: str
+    fallback: dict

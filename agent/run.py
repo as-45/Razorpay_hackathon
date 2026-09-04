@@ -31,6 +31,9 @@ def main():
         elif kind == "over_budget":
             print(f"\n  {ask['message']}")
             answer = input("  Continue? (y/n): ")
+        elif kind == "not_affordable":
+            print(f"\n  {ask['message']}")
+            answer = input("  Take it? (show / n): ")
         else:
             print(f"\n  {ask['summary']}")
             print(f"  Total: Rs {ask['total_paise']/100:.0f}")

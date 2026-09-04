@@ -209,13 +209,18 @@ def pay_order(order_id: str, db: Session = Depends(get_db)):
         return {"order_id": o.id, "payment_url": o.payment_url,
                 "status": o.status, "reused": True}
 
-    link = rzp.payment_link.create({
-        "amount": o.total_paise,
-        "currency": "INR",
-        "description": f"Order {o.id}",
-        "reference_id": o.id,
-        "notify": {"sms": False, "email": False},
-    })
+    try:
+        link = rzp.payment_link.create({
+            "amount": o.total_paise,
+            "currency": "INR",
+            "description": f"Order {o.id}",
+            "reference_id": o.id,
+            "notify": {"sms": False, "email": False},
+        })
+    except Exception as e:
+        log(db, o.trace_id, "merchant", "payment_link_failed", "refused",
+            str(e)[:200], o.total_paise)
+        raise HTTPException(502, f"payment_provider_error: {str(e)[:120]}")
 
     o.payment_link_id = link["id"]
     o.payment_url     = link["short_url"]

@@ -7,164 +7,52 @@ MERCHANT = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="Sharma Sweets — agentic commerce",
                    page_icon="🍬", layout="wide")
-
-# ─────────────── theme ───────────────
-# Every colour the app uses, named once, in two flavours. Nothing below this
-# block mentions a hex code — the CSS reads var(--name) instead, so switching
-# the palette re-skins the whole page.
-PALETTES = {
-    "dark": {
-        "scheme":         "dark",
-        "bg":             "#0f1115",
-        "surface":        "#161a21",
-        "panel":          "#141821",
-        "border":         "#2a303b",
-        "border-soft":    "#232a35",
-        "text":           "#d8dee9",
-        "text-strong":    "#f0f3f8",
-        "muted":          "#8b95a3",
-        "accent":         "#7aa2f7",
-        "amber":          "#e0c07a",
-        "rail":           "#3b4252",
-        "rail-ok":        "#5fa87a",
-        "rail-bad":       "#c96a6a",
-        "bad-bg":         "#20161a",
-        "btn-bg":         "#1b1f27",
-        "btn-border":     "#333a45",
-        "btn-hover-text": "#ffffff",
-        "primary":        "#2f6f4f",
-        "primary-border": "#3d8a63",
-        "primary-hover":  "#3d8a63",
-        "chip-bg":        "#1b2130",
-        "shadow":         "0 1px 2px rgba(0,0,0,.35)",
-    },
-    "light": {
-        "scheme":         "light",
-        "bg":             "#f6f7f9",
-        "surface":        "#ffffff",
-        "panel":          "#ffffff",
-        "border":         "#d6dbe3",
-        "border-soft":    "#e4e8ee",
-        "text":           "#2c333d",
-        "text-strong":    "#111419",
-        "muted":          "#616d7c",
-        "accent":         "#2f5fd0",
-        "amber":          "#8a6410",
-        "rail":           "#ccd3dd",
-        "rail-ok":        "#2f7d57",
-        "rail-bad":       "#c0392b",
-        "bad-bg":         "#fdf2f1",
-        "btn-bg":         "#ffffff",
-        "btn-border":     "#cbd2dc",
-        "btn-hover-text": "#111419",
-        "primary":        "#2f6f4f",
-        "primary-border": "#276043",
-        "primary-hover":  "#3d8a63",
-        "chip-bg":        "#e9f0ff",
-        "shadow":         "0 1px 2px rgba(16,24,40,.06)",
-    },
-}
-
-st.session_state.setdefault("theme", "dark")
-P = PALETTES[st.session_state.theme]
-
-# The variables go in their own tiny <style> so the big stylesheet below can
-# stay a plain string (no f-string brace-escaping headaches).
-st.markdown(
-    "<style>:root{"
-    + "".join(f"--{k}:{v};" for k, v in P.items() if k != "scheme")
-    + f"color-scheme:{P['scheme']};"
-    + "}</style>",
-    unsafe_allow_html=True)
-
 st.markdown("""
 <style>
-  .stApp { background:var(--bg); color:var(--text); }
-  .stApp p, .stApp li, .stApp span, .stApp label, .stApp div[data-testid="stMarkdownContainer"] {
-      color:var(--text); }
-
+  .stApp { background:#0f1115; color:#d8dee9; }
   h1 { font-size:2.1rem !important; font-weight:650 !important;
-       letter-spacing:-0.02em; color:var(--text-strong) !important;
-       text-align:center !important; }
+       letter-spacing:-0.02em; color:#f0f3f8 !important;text-align:center !important; }
   h3 { font-size:0.78rem !important; font-weight:600 !important;
        text-transform:uppercase; letter-spacing:0.1em;
-       color:var(--accent) !important; margin-top:1.6rem !important; }
+       color:#7aa2f7 !important; margin-top:1.6rem !important; }
   section[data-testid="stSidebar"] { display:none; }
 
   div[data-testid="stTextInput"] input,
   div[data-testid="stNumberInput"] input,
   div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
-      background:var(--surface) !important;
-      border:1px solid var(--border) !important;
-      color:var(--text) !important; border-radius:6px !important; }
-
-  /* +/- steppers on the number input */
-  div[data-testid="stNumberInput"] button {
-      background:var(--surface) !important;
-      border-color:var(--border) !important;
-      color:var(--muted) !important; }
-
-  /* chips inside the multiselect */
-  div[data-testid="stMultiSelect"] span[data-baseweb="tag"] {
-      background:var(--chip-bg) !important; color:var(--text-strong) !important; }
-
-  /* dropdown menu that opens over the page */
-  div[data-baseweb="popover"] div[data-baseweb="menu"],
-  ul[data-testid="stVirtualDropdown"] {
-      background:var(--surface) !important; color:var(--text) !important;
-      border:1px solid var(--border) !important; }
+      background:#161a21 !important; border:1px solid #2a303b !important;
+      color:#d8dee9 !important; border-radius:6px !important; }
 
   .stButton > button {
-      background:var(--btn-bg); border:1px solid var(--btn-border);
-      color:var(--text); border-radius:6px; font-weight:500;
-      transition:all .15s; box-shadow:var(--shadow); }
-  .stButton > button:hover {
-      border-color:var(--accent); color:var(--btn-hover-text); }
+      background:#1b1f27; border:1px solid #333a45; color:#d8dee9;
+      border-radius:6px; font-weight:500; transition:all .15s; }
+  .stButton > button:hover { border-color:#7aa2f7; color:#fff; }
   .stButton > button[kind="primary"] {
-      background:var(--primary); border-color:var(--primary-border); color:#fff; }
-  .stButton > button[kind="primary"]:hover { background:var(--primary-hover); }
-  .stLinkButton > a, .stDownloadButton > button {
-      background:var(--btn-bg); border:1px solid var(--btn-border);
-      color:var(--text) !important; border-radius:6px; }
+      background:#2f6f4f; border-color:#3d8a63; color:#fff; }
+  .stButton > button[kind="primary"]:hover { background:#3d8a63; }
 
   div[data-testid="stExpander"] {
-      background:var(--panel); border:1px solid var(--border-soft);
-      border-radius:8px; }
-  div[data-testid="stExpander"] summary { color:var(--text) !important; }
+      background:#141821; border:1px solid #232a35; border-radius:8px; }
 
-  /* receipt block + st.json */
-  .stApp pre, .stApp code, div[data-testid="stJson"] {
-      background:var(--surface) !important; color:var(--text) !important;
-      border:1px solid var(--border-soft) !important; border-radius:6px; }
-
-  /* success / warning / error / info boxes */
-  div[data-testid="stAlert"] {
-      background:var(--panel) !important;
-      border:1px solid var(--border-soft) !important; }
-  div[data-testid="stAlert"] p { color:var(--text) !important; }
-
-  hr, div[data-testid="stDivider"] hr { border-color:var(--border-soft) !important; }
-
-  .trail-row { border:1px solid var(--border-soft); border-left:3px solid var(--rail);
-      background:var(--panel); padding:10px 14px; margin:7px 0;
-      border-radius:0 6px 6px 0; }
-  .trail-ok      { border-left-color:var(--rail-ok); }
-  .trail-refused { border-left-color:var(--rail-bad); background:var(--bad-bg); }
-  .trail-head { font-size:0.9rem; font-weight:600; color:var(--text-strong); }
+  .trail-row { border-left:3px solid #3b4252; background:#141821;
+      padding:10px 14px; margin:7px 0; border-radius:0 6px 6px 0; }
+  .trail-ok      { border-left-color:#5fa87a; }
+  .trail-refused { border-left-color:#c96a6a; background:#20161a; }
+  .trail-head { font-size:0.9rem; font-weight:600; color:#e6ebf2; }
   .trail-actor { font-family:ui-monospace,Consolas,monospace;
-      font-size:0.7rem; color:var(--accent); background:var(--chip-bg);
+      font-size:0.7rem; color:#7aa2f7; background:#1b2130;
       padding:1px 7px; border-radius:4px; margin-left:8px; }
-  .trail-amt { float:right; color:var(--amber); font-size:0.85rem; }
-  .trail-reason { font-size:0.8rem; color:var(--muted); margin-top:3px; }
+  .trail-amt { float:right; color:#e0c07a; font-size:0.85rem; }
+  .trail-reason { font-size:0.8rem; color:#8b95a3; margin-top:3px; }
 
   /* clear the white bars behind embedded components */
   header[data-testid="stHeader"] { background:transparent !important; }
   div[data-testid="stToolbar"] { background:transparent !important; }
-  .block-container { padding-top:1.2rem !important; }
+  .block-container { padding-top:2rem !important; }
 
   /* the mic component renders in its own iframe with a white body.
      CSS cannot reach inside it, so clip the iframe to button width. */
-  .stApp iframe { background:transparent !important; }
+  .stApp iframe { background:transparent !important; color-scheme:dark; }
   .stApp div[data-testid="stCustomComponentV1"],
   .stApp div[data-testid="stIFrame"] {
       background:transparent !important;
@@ -179,29 +67,11 @@ st.markdown("""
   /* field labels in amber, matching the amounts */
   div[data-testid="stWidgetLabel"] p,
   label p {
-      color:var(--amber) !important; font-weight:600 !important;
+      color:#e0c07a !important; font-weight:600 !important;
       font-size:0.82rem !important; text-transform:uppercase;
       letter-spacing:0.06em; }
-
-  /* the theme switch itself — quiet, top-right */
-  .theme-switch .stButton > button {
-      background:transparent; border:1px solid var(--border-soft);
-      color:var(--muted); font-size:0.75rem; padding:2px 10px;
-      box-shadow:none; }
-  .theme-switch .stButton > button:hover {
-      border-color:var(--accent); color:var(--accent); }
 </style>
 """, unsafe_allow_html=True)
-
-_, _switch = st.columns([9, 1])
-with _switch:
-    st.markdown('<div class="theme-switch">', unsafe_allow_html=True)
-    _dark = st.session_state.theme == "dark"
-    if st.button("☀ Light" if _dark else "☾ Dark", use_container_width=True,
-                 help="Switch between the dark and light palette"):
-        st.session_state.theme = "light" if _dark else "dark"
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 st.title("Welcome to Agentic commerce — bounded AI shopping")
 # st.caption("A merchant, an AI buyer can purchase from unattended, with "

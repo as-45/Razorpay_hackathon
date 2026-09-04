@@ -25,9 +25,11 @@ def create_order(trace_id, mandate_id, items):
     return False, r.json()
 
 def pay_order(order_id):
+    """Returns (ok, payload). Provider failure is an outcome, not a crash."""
     r = requests.post(f"{BASE}/orders/{order_id}/pay", timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    if r.status_code == 200:
+        return True, r.json()
+    return False, r.json()
 
 def fetch_order(order_id):
     r = requests.get(f"{BASE}/orders/{order_id}", timeout=TIMEOUT)
