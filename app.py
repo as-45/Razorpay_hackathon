@@ -1,4 +1,4 @@
-import os, uuid, requests, streamlit as st
+import os, uuid, json, requests, streamlit as st
 from langgraph.types import Command
 from agent.graph import build
 from agent import tools
@@ -244,9 +244,12 @@ with left:
         st.success(f"Mandate {st.session_state.mandate} — "
                    f"Rs {cap:,.0f} on {', '.join(cats)}")
 
+    with st.expander("How this merchant describes itself to an AI (manifest)"):
+        st.code(json.dumps(manifest(), indent=2), language="json")
     with st.expander("What this merchant sells (machine-readable catalog)"):
         if st.button("Load catalog"):
-            st.json(requests.get(f"{MERCHANT}/catalog").json())
+            st.code(json.dumps(requests.get(f"{MERCHANT}/catalog").json(), indent=2),
+                    language="json")
 
     st.subheader("2. Tell the agent what to buy")
 
