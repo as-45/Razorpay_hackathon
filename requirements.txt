@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+razorpay
+python-dotenv
+requests
+langgraph
+langchain-ollama
+streamlit
+pytest
+
+# optional: streamlit-mic-recorder, faster-whisper (voice)
+# optional: webauthn (passkey mandates)

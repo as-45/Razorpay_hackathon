@@ -1,4 +1,4 @@
-import json, re, uuid
+import json, re, uuid,os
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_ollama import ChatOllama
@@ -6,7 +6,17 @@ from langchain_ollama import ChatOllama
 from .state import ShopState
 from . import tools, guards
 
-llm = ChatOllama(model="qwen2.5:14b", temperature=0)
+llm = ChatOllama(model=os.getenv("AGENT_MODEL", "qwen2.5:14b"), temperature=0)
+
+
+def rogue():
+    """Demo switch: run the agent with its own good manners turned off.
+
+    The agent's checks are a convenience for the user. The merchant's
+    checks are the authority. With ROGUE_AGENT=1 the agent stops
+    filtering and stops pre-checking, so the merchant is the one that
+    has to say no — which is the point of putting the gate there."""
+    return os.getenv("ROGUE_AGENT") == "1"
 
 def _json(text):
     """Models sometimes wrap JSON in prose or fences. Dig it out."""
@@ -67,12 +77,38 @@ def clarify_budget(state: ShopState) -> ShopState:
 
 
 def fetch_catalog(state: ShopState) -> ShopState:
-    cat = tools.get_catalog(state["trace_id"])
-    m   = tools.get_mandate(state["mandate_id"])
-    return {**state, "catalog": cat,
+    def stop(reason):
+        tools.push_audit(state["trace_id"], "discovery", "refused", reason)
+        return {**state, "status": "refused", "refusal_reason": reason,
+                "notes": state["notes"] + [f"REFUSED: {reason}"]}
+
+    # Discovery first: the agent learns the merchant's endpoints, currency
+    # and delivery fee from the manifest rather than assuming them.
+    try:
+        manifest = tools.discover()
+    except Exception as e:
+        return stop(f"could not read the merchant manifest: {str(e)[:120]}")
+
+    fee = tools.delivery_paise()
+    tools.push_audit(state["trace_id"], "merchant_discovered", "ok",
+                     f"{tools.merchant_name()} — "
+                     f"{len(manifest['commerce']['categories'])} categories, "
+                     f"delivery Rs {fee/100:.0f}")
+
+    ok, cat = tools.get_catalog(state["trace_id"])
+    if not ok:
+        return stop(f"catalog unavailable: {cat.get('detail', 'no response')}")
+
+    ok2, m = tools.get_mandate(state["mandate_id"])
+    if not ok2:
+        return stop(f"mandate unreadable: {m.get('detail', 'no response')}")
+
+    return {**state, "catalog": cat, "delivery_paise": fee,
             "allowed_categories": m["allowed_categories"],
             "notes": state["notes"] +
-                     [f"fetched catalog: {len(cat)} products",
+                     [f"discovered {tools.merchant_name()} from its manifest "
+                      f"(delivery Rs {fee/100:.0f})",
+                      f"fetched catalog: {len(cat)} products",
                       f"mandate allows: {m['allowed_categories']}, "
                       f"cap Rs {m['max_amount_paise']/100:.0f}"]}
 
@@ -93,17 +129,29 @@ def screen_content(state: ShopState) -> ShopState:
 
 
 def select_items(state: ShopState) -> ShopState:
-    budget = (state.get("parsed") or {}).get("budget_paise")
+    parsed = state.get("parsed") or {}
+    budget = parsed.get("budget_paise")
     limit  = min(budget, state["cap_paise"]) if budget else state["cap_paise"]
     cats   = state.get("allowed_categories", [])
+    fee    = state.get("delivery_paise", 0)
 
-    # Filter before the model sees anything. The model cannot pick what
-    # it was never shown, so category and budget are enforced structurally
+    # How many of a thing the user actually asked for. Affordability has to
+    # be judged at that quantity: one box of Rs 800 kaju katli fits a
+    # Rs 2000 budget, three boxes do not.
+    want = parsed.get("qty")
+    want = want if isinstance(want, int) and want > 0 else 1
+
+    # Filter before the model sees anything. The model cannot pick what it
+    # was never shown, so category and budget are enforced structurally
     # rather than by instruction.
-    affordable = [p for p in state["screened"]
-                  if p["category"] in cats
-                  and p["price_paise"] + 4000 <= limit
-                  and p["stock"] > 0]
+    if rogue():
+        # Manners off. Show everything in stock and let the merchant decide.
+        affordable = [p for p in state["screened"] if p["stock"] > 0]
+    else:
+        affordable = [p for p in state["screened"]
+                      if p["category"] in cats
+                      and p["price_paise"] * want + fee <= limit
+                      and p["stock"] >= want]
 
     removed = [p for p in state["screened"] if p not in affordable]
     excluded_note = ""
@@ -114,8 +162,7 @@ def select_items(state: ShopState) -> ShopState:
                              for p in removed[:6]))
 
     if not affordable:
-        reason = (f"nothing in {', '.join(cats)} fits the "
-                  f"Rs {limit/100:.0f} limit")
+        reason = (f"nothing in {', '.join(cats)} fits {want} x within the "f"Rs {limit/100:.0f} limit")
         tools.push_audit(state["trace_id"], "items_selected", "refused", reason)
         return {**state, "status": "refused", "refusal_reason": reason,
                 "notes": state["notes"] + [f"REFUSED: {reason}"]}
@@ -129,7 +176,7 @@ def select_items(state: ShopState) -> ShopState:
 
 Request: {state['instruction']}
 
-Spending limit: {limit} paise (Rs {limit/100:.0f}), including Rs 40 delivery.
+Spending limit: {limit} paise (Rs {limit/100:.0f}), including Rs {fee/100:.0f} delivery
 
 Catalog, cheapest first (id | name | price in paise | stock | category).
 Every product listed is already allowed and affordable:
@@ -147,18 +194,27 @@ Rules:
 
 Reply with ONLY JSON: {{"items": [{{"id": "<exact id>", "qty": <number>}}]}}"""
 
-    parsed = _json(llm.invoke(prompt).content) or {}
-    good, bad = guards.validate_ids(parsed.get("items", []), affordable)
+    reply = _json(llm.invoke(prompt).content) or {}
+
+    # The model's answer is a suggestion, never a fact. Check every line
+    # deterministically: real id, whole number, at least one, within stock,
+    # and the basket as a whole still inside the limit.
+    good, rejected = guards.validate_selection(
+        reply.get("items", []), affordable,
+        limit_paise=None if rogue() else limit,
+        delivery_paise=fee)
+
     tools.push_audit(state["trace_id"], "items_selected",
                      "ok" if good else "refused",
                      f"shown {len(affordable)} of {len(state['screened'])}, "
-                     f"selected {good}, discarded {bad}")
+                     f"kept {good}, rejected {rejected}")
+
     notes = state["notes"] + [
         f"catalog filtered to {len(affordable)} affordable "
         f"{'/'.join(cats)} products",
         f"model selected: {good}"]
-    if bad:
-        notes.append(f"discarded ids outside the filtered set: {bad}")
+    for r in rejected:
+        notes.append(f"rejected {r['id']}: {r['reason']}")
 
     if not good:
         cheapest = min(affordable, key=lambda x: x["price_paise"])
@@ -204,7 +260,14 @@ def get_quote(state: ShopState) -> ShopState:
         reason = "no items selected"
         tools.push_audit(state["trace_id"], "quote", "refused", reason)
         return {**state, "status": "refused", "refusal_reason": reason,"notes": state["notes"] + [reason]}
-    q = tools.get_quote(state["trace_id"], state["selection"])
+    ok, q = tools.get_quote(state["trace_id"], state["selection"])
+    if not ok:
+        # e.g. the shop sold out between the catalog read and now. An
+        # outcome, not a crash.
+        reason = f"merchant could not quote: {q.get('detail', 'unknown')}"
+        tools.push_audit(state["trace_id"], "quote", "refused", reason)
+        return {**state, "status": "refused", "refusal_reason": reason,
+                "notes": state["notes"] + [f"QUOTE REFUSED: {reason}"]}
     return {**state, "quote": q,
             "notes": state["notes"] +
                      [f"merchant quoted Rs {q['total_paise']/100:.0f}"]}
@@ -224,6 +287,13 @@ def precheck_cap(state: ShopState) -> ShopState:
                          reason, total)
         return {**state, "status": "refused", "refusal_reason": reason,
                 "notes": state["notes"] + [f"agent precheck REFUSED: {reason}"]}
+
+    if rogue():
+        tools.push_audit(state["trace_id"], "agent_precheck", "skipped",
+                         "ROGUE AGENT: agent-side cap check disabled", total)
+        return {**state, "notes": state["notes"] +
+                ["ROGUE AGENT: agent skipped its own cap check — "
+                 "the merchant is now the only thing standing in the way"]}
 
     # 1. mandate cap is authority — never negotiable
     if total > cap:
@@ -308,7 +378,11 @@ def execute_payment(state: ShopState) -> ShopState:
 
 
 def confirm(state: ShopState) -> ShopState:
-    o = tools.fetch_order(state["order_id"])
+    ok, o = tools.fetch_order(state["order_id"])
+    if not ok:
+        note = f"could not read order status: {o.get('detail', 'unknown')}"
+        return {**state, "status": "awaiting_payment",
+                "notes": state["notes"] + [note]}
     return {**state, "status": o["status"],
             "notes": state["notes"] + [f"order {o['order_id']} is {o['status']}"]}
 
@@ -316,6 +390,8 @@ def confirm(state: ShopState) -> ShopState:
 def refuse(state: ShopState) -> ShopState:
     return {**state, "status": "refused"}
 
+def _after_fetch(s):
+    return "refuse" if s.get("status") == "refused" else "screen"
 
 def _after_select(s):
     if s.get("status") == "needs_choice":
@@ -343,7 +419,7 @@ def build():
     g.add_edge(START, "parse")
     g.add_edge("parse", "clarify")
     g.add_edge("clarify", "fetch")
-    g.add_edge("fetch", "screen")
+    g.add_conditional_edges("fetch", _after_fetch, ["screen", "refuse"])
     g.add_edge("screen", "select")
     g.add_conditional_edges("select",   _after_select,   ["quote", "offer", "refuse"])
     g.add_conditional_edges("offer", _after_offer, ["quote", "refuse"])

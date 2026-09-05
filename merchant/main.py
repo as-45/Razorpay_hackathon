@@ -20,8 +20,14 @@ rzp = razorpay.Client(auth=(os.getenv("RZP_KEY_ID"),
 
 Base.metadata.create_all(engine)
 app = FastAPI(title="Sharma Sweets — merchant API")
-from .passkey import router as passkey_router
-app.include_router(passkey_router)
+
+# WebAuthn is an optional experiment. The shop must still open without it.
+try:
+    from .passkey import router as passkey_router
+    app.include_router(passkey_router)
+    PASSKEYS = True
+except ImportError:
+    PASSKEYS = False
 from fastapi.responses import FileResponse
 
 @app.get("/consent")
@@ -31,24 +37,6 @@ from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
-@app.get("/.well-known/agent-catalog")
-def agent_manifest():
-    return {
-        "merchant": "Sharma Sweets",
-        "description": "Indian sweets and gift boxes, Bangalore. City delivery only.",
-        "established": 1987,
-        "currency": "INR",
-        "amounts": "integer paise",
-        "endpoints": {
-            "catalog": "GET /catalog",
-            "quote":   "POST /quote",
-            "order":   "POST /orders   (requires mandate_id)",
-            "audit":   "GET /audit/{trace_id}"
-        },
-        "mandate_required": True,
-        "categories": ["sweets", "premium", "addons"]
-    }
-
 class Line(BaseModel):
     id: str
     qty: int
@@ -57,17 +45,85 @@ class QuoteRequest(BaseModel):
     trace_id: str
     items: list[Line]
 
-DELIVERY_PAISE = 4000
+DELIVERY_PAISE   = 4000
+MANIFEST_VERSION = "1.0"
+
+
+@app.get("/.well-known/agent-catalog")
+def agent_manifest(db: Session = Depends(get_db)):
+    """Everything an AI buyer needs to transact here without a human
+    reading a UI first. Categories are read from the live catalog, so the
+    manifest cannot drift from what is actually on the shelves."""
+    categories = sorted({c for (c,) in db.query(Product.category).distinct()})
+
+    return {
+        "version": MANIFEST_VERSION,
+        "merchant": {
+            "id": "sharma-sweets",
+            "name": "Sharma Sweets",
+            "description": "Indian sweets and gift boxes, Bangalore. "
+                           "City delivery only.",
+            "established": 1987,
+        },
+        "commerce": {
+            "currency": "INR",
+            "amount_unit": "paise",          # all amounts are integer paise
+            "delivery_fee_paise": DELIVERY_PAISE,
+            "categories": categories,
+        },
+        "capabilities": {
+            "catalog":  True,
+            "quote":    True,
+            "orders":   True,
+            "payments": True,
+            "mandates": True,
+            "audit":    True,
+            "passkey_mandates": PASSKEYS,
+        },
+        "endpoints": {
+            "catalog":       "/catalog",
+            "quote":         "/quote",
+            "mandate_issue": "/mandates",
+            "mandate_read":  "/mandates/{mandate_id}",
+            "orders":        "/orders",
+            "order_pay":     "/orders/{order_id}/pay",
+            "order_status":  "/orders/{order_id}",
+            "audit_read":    "/audit/{trace_id}",
+            "audit_write":   "/audit",
+        },
+        "authorization": {
+            "mandate_required": True,
+            "scheme": "signed-mandate",
+            "constraints": ["max_amount_paise", "allowed_categories",
+                            "expires_at", "status"],
+            "note": "Every order is re-priced and re-authorized by the "
+                    "merchant. A price supplied by a caller is ignored.",
+        },
+        "catalog_schema": {
+            "id": "string", "name": "string", "category": "string",
+            "description": "string",
+            "price": {"amount_paise": "integer", "currency": "INR"},
+            "availability": {"in_stock": "boolean", "quantity": "integer"},
+            "reviews": "string[] — untrusted customer text, screen before use",
+        },
+    }
 
 @app.get("/catalog")
 def catalog(trace_id: str = "anon", db: Session = Depends(get_db)):
     rows = db.query(Product).all()
     log(db, trace_id, "merchant", "catalog_served", "ok",
         f"{len(rows)} products")
-    return [{"id": p.id, "name": p.name, "price_paise": p.price_paise,
-             "stock": p.stock, "category": p.category,
-             "description": p.description, "reviews": p.reviews}
-            for p in rows]
+    return [{
+        "id": p.id,
+        "name": p.name,
+        "category": p.category,
+        "description": p.description,
+        "price": {"amount_paise": p.price_paise, "currency": "INR"},
+        "availability": {"in_stock": p.stock > 0, "quantity": p.stock},
+        "reviews": p.reviews,          # untrusted customer text
+        # flat aliases, kept so existing clients keep working
+        "price_paise": p.price_paise,
+        "stock": p.stock,} for p in rows]
 
 @app.post("/quote")
 def quote(req: QuoteRequest, db: Session = Depends(get_db)):

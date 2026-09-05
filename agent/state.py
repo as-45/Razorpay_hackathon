@@ -9,7 +9,8 @@ class ShopState(TypedDict, total=False):
     catalog:        list           # raw from merchant
     screened:       list           # after guards.py cleans it
     findings:       list           # suspicious content found
-    allowed_categories: list  
+    allowed_categories: list
+    delivery_paise: int            # discovered from the merchant manifest  
     selection:      list           # [{"id": "...", "qty": n}]
     quote:          dict           # merchant's authoritative total
 

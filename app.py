@@ -1,9 +1,16 @@
-import uuid, requests, streamlit as st
+import os, uuid, requests, streamlit as st
 from langgraph.types import Command
 from agent.graph import build
+from agent import tools
 from streamlit_mic_recorder import mic_recorder
 
-MERCHANT = "http://127.0.0.1:8000"
+# One address, from the environment. Everything else — endpoint paths,
+# categories, delivery fee — is read from the merchant's own manifest.
+MERCHANT = os.getenv("MERCHANT_URL", "http://127.0.0.1:8000").rstrip("/")
+
+@st.cache_data(ttl=30)
+def manifest():
+    return tools.discover(MERCHANT)
 
 st.set_page_config(page_title="Sharma Sweets — agentic commerce",
                    page_icon="🍬", layout="wide")
@@ -219,7 +226,10 @@ with left:
     st.subheader("1. Grant spending authority")
 
     cap  = st.number_input("Spending cap (Rs)", 100, 100000, 2000, step=100)
-    cats = st.multiselect("Allowed categories",["sweets", "premium", "milk", "new", "addons"],["sweets"])
+    # Categories come from the merchant's manifest, not a hardcoded list.
+    all_cats = manifest()["commerce"]["categories"]
+    cats = st.multiselect("Allowed categories", all_cats,
+                          ["sweets" ] if "sweets" in all_cats else all_cats[:1])
 
     if st.button("Issue mandate", use_container_width=True):
         r = requests.post(f"{MERCHANT}/mandates", json={
@@ -265,11 +275,16 @@ with left:
                          help="Type it, or use the mic above. "
                               "You can edit what was heard.")
 
+    rogue = st.checkbox("Run as a misbehaving agent",help="Turns off the agent's own filtering and cap check. The order "
+    "still goes to the merchant, which refuses it on its own "
+    "authority. This is how you can tell the gate is not in the agent.")
+
     if st.button("Run agent", type="primary", use_container_width=True,
                  disabled=not st.session_state.mandate):
         if not text.strip():
             st.warning("Give the agent an instruction first.")
         else:
+            os.environ["ROGUE_AGENT"] = "1" if rogue else "0"
             st.session_state.trace = f"agt_{uuid.uuid4().hex[:8]}"
             st.session_state.graph = build()
             st.session_state.paid_order = None
