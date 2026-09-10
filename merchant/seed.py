@@ -56,15 +56,68 @@ PRODUCTS = [
      "Festive paper and ribbon.", []),
 ]
 
+# What a machine needs beyond a price: how it is sold, what it weighs, and
+# the other names a shopper might use for it.
+#   id: (unit, net_weight_g, [aliases], variant_group, variant_label)
+DETAIL = {
+    "sw_001": ("box", 500, ["cashew barfi", "kaju barfi", "kaju katali",
+                            "ಕಾಜು ಕತ್ಲಿ", "काजू कतली"], "kaju-katli", "500 g box"),
+    "sw_002": ("box", 500, ["motichur ladoo", "boondi laddu", "ಮೋತಿಚೂರ್ ಲಡ್ಡು"],
+               None, None),
+    "sw_003": ("box", 400, ["nariyal barfi", "coconut burfi", "kobbari mithai"],
+               None, None),
+    "sw_004": ("box", 500, ["mysore pak", "mysurpa", "ಮೈಸೂರು ಪಾಕ್"], None, None),
+    "sw_005": ("tin", 1000, ["rasgulla", "roshogolla", "rasagulla"], None, None),
+    "sw_008": ("box", 500, ["besan ladoo", "gram flour laddu", "ಬೇಸನ್ ಲಡ್ಡು"],
+               None, None),
+    "sw_010": ("pack", 400, ["jilebi", "jangiri", "ಜಿಲೇಬಿ"], None, None),
+    "sw_011": ("bar", 100, ["peanut chikki", "groundnut brittle", "kadalekai mithai"],
+               None, None),
+    "sw_006": ("box", 750, ["dry fruits box", "assorted nuts hamper"], None, None),
+    "sw_009": ("bar", 100, ["kesar bar", "saffron chocolate"], None, None),
+    "sw_012": ("roll", 250, ["kesar pista", "saffron pistachio roll"], None, None),
+    "sw_013": ("box", 400, ["gold barfi", "varq barfi"], None, None),
+    "sw_014": ("tin", 1000, ["rasmalai", "ras malai"], None, None),
+    "sw_015": ("box", 500, ["kalakhand", "milk cake"], None, None),
+    "sw_016": ("box", 400, ["peda", "penda", "ಪೇಡಾ"], None, None),
+    "sw_017": ("tin", 1000, ["gulab jamun", "gulaab jaamun"], None, None),
+    "sw_018": ("box", 500, ["chocolate barfi", "cocoa barfi"], None, None),
+    "sw_019": ("box", 500, ["ragi laddu", "millet ladoo", "ರಾಗಿ ಲಡ್ಡು"], None, None),
+    "sw_020": ("box", 400, ["baklava", "pistachio baklava"], None, None),
+    "sw_007": ("piece", None, ["gift wrapping", "festive wrap"], None, None),
+}
+
+
+def _rebuild_if_stale():
+    """A database written by an older version is missing the newer product
+    columns, and SQLite will not add them to an existing table. Products
+    are seed data, so the safe move is to rebuild the table rather than
+    make everyone remember to delete the file."""
+    from sqlalchemy import inspect
+    insp = inspect(engine)
+    if not insp.has_table("products"):
+        return
+    have = {c["name"] for c in insp.get_columns("products")}
+    need = {"unit", "net_weight_g", "aliases", "variant_group", "variant_label"}
+    if not need <= have:
+        print("products table is from an older version — rebuilding it")
+        Product.__table__.drop(engine)
+
+
 def run():
+    _rebuild_if_stale()
     Base.metadata.create_all(engine)
     db = SessionLocal()
     db.query(Product).delete()
     for pid, name, price, stock, cat, desc, revs in PRODUCTS:
+        unit, grams, aliases, vgroup, vlabel = DETAIL.get(
+            pid, ("box", None, [], None, None))
         db.add(Product(id=pid, name=name, price_paise=price, stock=stock,
-                       category=cat, description=desc, reviews=revs))
+                       category=cat, description=desc, reviews=revs,
+                       unit=unit, net_weight_g=grams, aliases=aliases,
+                       variant_group=vgroup, variant_label=vlabel))
     db.commit()
     print(f"seeded {len(PRODUCTS)} products")
 
 if __name__ == "__main__":
-    run()
+    run() 

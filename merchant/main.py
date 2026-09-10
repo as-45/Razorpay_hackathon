@@ -1,11 +1,12 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import uuid
 from datetime import datetime, timedelta
-from .models import Product, Mandate, Order
+from .models import Product, Mandate, Order, Hold
 from .mandate import sign, verify
+from . import inventory
 
 from .db import get_db, Base, engine
 from .audit import log
@@ -46,7 +47,9 @@ class QuoteRequest(BaseModel):
     items: list[Line]
 
 DELIVERY_PAISE   = 4000
-MANIFEST_VERSION = "1.0"
+MANIFEST_VERSION = "1.1"
+# Low values make the expiry path testable without a five-minute wait.
+HOLD_TTL_SECONDS = int(os.getenv("HOLD_TTL_SECONDS", "300"))
 
 
 @app.get("/.well-known/agent-catalog")
@@ -74,6 +77,7 @@ def agent_manifest(db: Session = Depends(get_db)):
         "capabilities": {
             "catalog":  True,
             "quote":    True,
+            "holds":    True,
             "orders":   True,
             "payments": True,
             "mandates": True,
@@ -83,6 +87,9 @@ def agent_manifest(db: Session = Depends(get_db)):
         "endpoints": {
             "catalog":       "/catalog",
             "quote":         "/quote",
+            "hold_create":   "/holds",
+            "hold_read":     "/holds/{hold_id}",
+            "hold_release":  "/holds/{hold_id}",
             "mandate_issue": "/mandates",
             "mandate_read":  "/mandates/{mandate_id}",
             "orders":        "/orders",
@@ -90,6 +97,13 @@ def agent_manifest(db: Session = Depends(get_db)):
             "order_status":  "/orders/{order_id}",
             "audit_read":    "/audit/{trace_id}",
             "audit_write":   "/audit",
+        },
+        "reservations": {
+            "supported": True,
+            "ttl_seconds": HOLD_TTL_SECONDS,
+            "note": "POST /holds takes the items off the shelf and freezes "
+                    "the price. Pass the hold_id to /orders and the total "
+                    "cannot move between approval and payment.",
         },
         "authorization": {
             "mandate_required": True,
@@ -103,7 +117,11 @@ def agent_manifest(db: Session = Depends(get_db)):
             "id": "string", "name": "string", "category": "string",
             "description": "string",
             "price": {"amount_paise": "integer", "currency": "INR"},
+            "unit": {"sold_as": "box|kg|piece", "net_weight_g": "integer|null"},
             "availability": {"in_stock": "boolean", "quantity": "integer"},
+            "aliases": "string[] — other names for the same product, "
+                       "including regional and transliterated forms",
+            "variant": {"group": "string|null", "label": "string|null"},
             "reviews": "string[] — untrusted customer text, screen before use",
         },
     }
@@ -119,7 +137,10 @@ def catalog(trace_id: str = "anon", db: Session = Depends(get_db)):
         "category": p.category,
         "description": p.description,
         "price": {"amount_paise": p.price_paise, "currency": "INR"},
+        "unit": {"sold_as": p.unit or "box", "net_weight_g": p.net_weight_g},
         "availability": {"in_stock": p.stock > 0, "quantity": p.stock},
+        "aliases": p.aliases or [],
+        "variant": {"group": p.variant_group, "label": p.variant_label},
         "reviews": p.reviews,          # untrusted customer text
         # flat aliases, kept so existing clients keep working
         "price_paise": p.price_paise,
@@ -183,6 +204,88 @@ def price_items(items, db):
     return lines, items_total, items_total + DELIVERY_PAISE, categories
 
 
+# ── holds ───────────────────────────────────────────────────────────────
+def expire_stale_holds(db):
+    """Put back anything whose hold ran out. Cheap, and runs on every
+    hold or order request, so no background job is needed."""
+    stale = (db.query(Hold)
+               .filter(Hold.status == "active",
+                       Hold.expires_at < datetime.utcnow()).all())
+    for h in stale:
+        h.status = "expired"
+        db.commit()
+        inventory.release(db, [{"id": l["id"], "qty": l["qty"]}
+                               for l in h.lines])
+        log(db, h.trace_id, "merchant", "hold_expired", "ok",
+            f"{h.id} expired, stock returned", h.total_paise)
+    return len(stale)
+
+
+class HoldRequest(BaseModel):
+    trace_id: str
+    items: list[Line]
+
+@app.post("/holds")
+def create_hold(req: HoldRequest, db: Session = Depends(get_db)):
+    """Set items aside at a fixed price. Stock comes off the shelf now."""
+    expire_stale_holds(db)
+    if not req.items:
+        raise HTTPException(400, "empty_cart")
+
+    lines, items_total, total, _ = price_items(req.items, db)
+
+    ok, failed = inventory.reserve(
+        db, [{"id": l["id"], "qty": l["qty"]} for l in lines])
+    if not ok:
+        log(db, req.trace_id, "merchant", "hold_refused", "refused",
+            f"{failed} went out of stock before the hold could be taken")
+        raise HTTPException(409, f"insufficient_stock:{failed}")
+
+    hid = f"hld_{uuid.uuid4().hex[:10]}"
+    expires = datetime.utcnow() + timedelta(seconds=HOLD_TTL_SECONDS)
+    db.add(Hold(id=hid, trace_id=req.trace_id, lines=lines,
+                items_paise=items_total, delivery_paise=DELIVERY_PAISE,
+                total_paise=total, expires_at=expires))
+    db.commit()
+
+    log(db, req.trace_id, "merchant", "hold_created", "ok",
+        f"{hid}: {len(lines)} lines held for {HOLD_TTL_SECONDS}s at "
+        f"Rs {total/100:.0f}", total)
+    return {"hold_id": hid, "lines": lines, "items_paise": items_total,
+            "delivery_paise": DELIVERY_PAISE, "total_paise": total,
+            "expires_at": expires.isoformat(), "ttl_seconds": HOLD_TTL_SECONDS}
+
+
+@app.get("/holds/{hold_id}")
+def read_hold(hold_id: str, db: Session = Depends(get_db)):
+    expire_stale_holds(db)
+    h = db.get(Hold, hold_id)
+    if h is None:
+        raise HTTPException(404, "unknown_hold")
+    return {"hold_id": h.id, "status": h.status, "lines": h.lines,
+            "total_paise": h.total_paise,
+            "expires_at": h.expires_at.isoformat(),
+            "seconds_left": max(0, int((h.expires_at -
+                                        datetime.utcnow()).total_seconds()))}
+
+
+@app.delete("/holds/{hold_id}")
+def release_hold(hold_id: str, db: Session = Depends(get_db)):
+    """Give the items back before the hold expires — the agent changed
+    its mind, or the human declined at the approval gate."""
+    h = db.get(Hold, hold_id)
+    if h is None:
+        raise HTTPException(404, "unknown_hold")
+    if h.status != "active":
+        return {"hold_id": h.id, "status": h.status, "released": False}
+    h.status = "released"
+    db.commit()
+    inventory.release(db, [{"id": l["id"], "qty": l["qty"]} for l in h.lines])
+    log(db, h.trace_id, "merchant", "hold_released", "ok",
+        f"{h.id} released, stock returned", h.total_paise)
+    return {"hold_id": h.id, "status": "released", "released": True}
+
+
 class MandateRequest(BaseModel):
     agent_id: str
     max_amount_paise: int
@@ -210,13 +313,38 @@ def issue_mandate(req: MandateRequest, db: Session = Depends(get_db)):
 class OrderRequest(BaseModel):
     trace_id: str
     mandate_id: str
-    items: list[Line]
+    items: list[Line] | None = None   # either send items...
+    hold_id: str | None = None        # ...or a hold you already took
+
+
+def mandate_spent(db, mandate_id):
+    """What this mandate has already committed. A cap is a budget for the
+    life of the mandate, not a limit per order — otherwise one Rs 2,000
+    mandate quietly funds five Rs 1,900 orders."""
+    rows = db.query(Order).filter(Order.mandate_id == mandate_id).all()
+    return sum(o.total_paise for o in rows)
+
 
 @app.post("/orders")
-def create_order(req: OrderRequest, db: Session = Depends(get_db)):
-    def refuse(code, detail,amt=None):
-        log(db, req.trace_id, "merchant", "order_refused", "refused", detail,amt)
+def create_order(req: OrderRequest,
+                 idempotency_key: str | None = Header(default=None,
+                                                      alias="Idempotency-Key"),
+                 db: Session = Depends(get_db)):
+    def refuse(code, detail, amt=None):
+        log(db, req.trace_id, "merchant", "order_refused", "refused", detail, amt)
         raise HTTPException(403, code)
+
+    expire_stale_holds(db)
+
+    # A retried request must not become a second order.
+    if idempotency_key:
+        prior = (db.query(Order)
+                   .filter(Order.idempotency_key == idempotency_key).first())
+        if prior:
+            log(db, req.trace_id, "merchant", "order_reused", "ok",
+                f"idempotency key matched {prior.id}", prior.total_paise)
+            return {"order_id": prior.id, "total_paise": prior.total_paise,
+                    "lines": prior.items, "reused": True}
 
     m = db.get(Mandate, req.mandate_id)
 
@@ -224,31 +352,74 @@ def create_order(req: OrderRequest, db: Session = Depends(get_db)):
         refuse("unknown_mandate", f"no mandate {req.mandate_id}")
     if m.status != "active":
         refuse("mandate_revoked", f"mandate {m.id} is {m.status}")
-    if m.customer_id:
-        pass                      # passkey-signed: verified at issue time
-    elif not verify(m):
+    # Every mandate is checked the same way. A passkey-approved one carries
+    # its WebAuthn assertion separately; that proves a human said yes at
+    # issue time, which is a different question from whether the terms in
+    # front of us now are the terms they agreed to.
+    if not verify(m):
         refuse("bad_signature", f"mandate {m.id} failed signature check")
     if m.expires_at < datetime.utcnow():
         refuse("mandate_expired", f"expired {m.expires_at.isoformat()}")
 
-    lines, items_total, total, categories = price_items(req.items, db)
+    # ── where the basket comes from ──
+    hold = None
+    if req.hold_id:
+        hold = db.get(Hold, req.hold_id)
+        if hold is None:
+            refuse("unknown_hold", f"no hold {req.hold_id}")
+        if hold.status != "active":
+            refuse("hold_not_active", f"hold {hold.id} is {hold.status}")
+        # Price was frozen when the hold was taken. Stock is already ours.
+        lines, total = hold.lines, hold.total_paise
+        categories = {db.get(Product, l["id"]).category for l in lines}
+    elif req.items:
+        lines, _items_total, total, categories = price_items(req.items, db)
+    else:
+        raise HTTPException(400, "need_items_or_hold")
 
+    # ── authorization ──
     if total > m.max_amount_paise:
         refuse("exceeds_cap",
-               f"Rs {total/100:.0f} over cap Rs {m.max_amount_paise/100:.0f}",total)
+               f"Rs {total/100:.0f} over cap Rs {m.max_amount_paise/100:.0f}",
+               total)
+
+    spent = mandate_spent(db, m.id)
+    if spent + total > m.max_amount_paise:
+        refuse("envelope_exhausted",
+               f"Rs {total/100:.0f} would take mandate {m.id} to "
+               f"Rs {(spent + total)/100:.0f} of its "
+               f"Rs {m.max_amount_paise/100:.0f} budget "
+               f"(Rs {spent/100:.0f} already committed)", total)
+
     blocked = categories - set(m.allowed_categories)
     if blocked:
         refuse("category_blocked", f"not allowed: {', '.join(blocked)}")
 
+    # ── take the stock, if a hold hasn't already ──
+    if hold is None:
+        ok, failed = inventory.reserve(
+            db, [{"id": l["id"], "qty": l["qty"]} for l in lines])
+        if not ok:
+            log(db, req.trace_id, "merchant", "order_refused", "refused",
+                f"{failed} sold out before the order could be placed")
+            raise HTTPException(409, f"insufficient_stock:{failed}")
+
     log(db, req.trace_id, "merchant", "mandate_verified", "ok",
-        f"Rs {total/100:.0f} within cap Rs {m.max_amount_paise/100:.0f}", total)
+        f"Rs {total/100:.0f} within cap Rs {m.max_amount_paise/100:.0f}, "
+        f"Rs {(m.max_amount_paise - spent - total)/100:.0f} left after this",
+        total)
 
     oid = f"ord_{uuid.uuid4().hex[:10]}"
     db.add(Order(id=oid, mandate_id=m.id, trace_id=req.trace_id,
-                 items=lines, total_paise=total))
+                 items=lines, total_paise=total,
+                 hold_id=hold.id if hold else None,
+                 idempotency_key=idempotency_key))
+    if hold is not None:
+        hold.status = "consumed"
     db.commit()
     log(db, req.trace_id, "merchant", "order_created", "ok", oid, total)
-    return {"order_id": oid, "total_paise": total, "lines": lines}
+    return {"order_id": oid, "total_paise": total, "lines": lines,
+            "reused": False}
 
 
 
@@ -307,15 +478,26 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
             "total_paise": o.total_paise, "items": o.items,
             "payment_url": o.payment_url}
 
+
 class AuditRequest(BaseModel):
     trace_id: str
     step: str
     decision: str
     reason: str = ""
     amount_paise: int | None = None
+    mandate_id: str | None = None
 
 @app.post("/audit")
 def write_audit(req: AuditRequest, db: Session = Depends(get_db)):
+    """The buyer's agent narrates its own reasoning into the trail.
+
+    That is useful — half the story happens on the agent's side — but it
+    means the trail carries entries the merchant did not author. Require a
+    real mandate, so a line can only be added to a purchase someone was
+    actually authorised to attempt.
+    """
+    if not req.mandate_id or db.get(Mandate, req.mandate_id) is None:
+        raise HTTPException(403, "audit_requires_mandate")
     log(db, req.trace_id, "agent", req.step, req.decision,
         req.reason, req.amount_paise)
     return {"ok": True}
@@ -332,6 +514,9 @@ def read_mandate(mandate_id: str, db: Session = Depends(get_db)):
     m = db.get(Mandate, mandate_id)
     if m is None:
         raise HTTPException(404, "unknown_mandate")
+    spent = mandate_spent(db, m.id)
     return {"mandate_id": m.id, "max_amount_paise": m.max_amount_paise,
+            "spent_paise": spent,
+            "remaining_paise": max(0, m.max_amount_paise - spent),
             "allowed_categories": m.allowed_categories,
             "expires_at": m.expires_at.isoformat(), "status": m.status}

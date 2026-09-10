@@ -67,11 +67,33 @@ def get_quote(trace_id, items):
         json={"trace_id": trace_id, "items": items})))
 
 
-def create_order(trace_id, mandate_id, items):
+def supports_holds():
+    return bool(discover().get("capabilities", {}).get("holds"))
+
+
+def create_hold(trace_id, items):
+    """Ask the merchant to set these aside at today's price."""
     return _safe(lambda: _result(requests.post(
-        _url("orders"), timeout=TIMEOUT,
-        json={"trace_id": trace_id, "mandate_id": mandate_id,
-              "items": items})))
+        _url("hold_create"), timeout=TIMEOUT,
+        json={"trace_id": trace_id, "items": items})))
+
+
+def release_hold(hold_id):
+    """Give them back — the human declined, or the run ended early."""
+    return _safe(lambda: _result(requests.delete(
+        _url("hold_release", hold_id=hold_id), timeout=TIMEOUT)))
+
+
+def create_order(trace_id, mandate_id, items=None, hold_id=None,
+                 idempotency_key=None):
+    body = {"trace_id": trace_id, "mandate_id": mandate_id}
+    if hold_id:
+        body["hold_id"] = hold_id
+    else:
+        body["items"] = items
+    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+    return _safe(lambda: _result(requests.post(
+        _url("orders"), timeout=TIMEOUT, json=body, headers=headers)))
 
 
 def pay_order(order_id):
@@ -89,11 +111,23 @@ def get_mandate(mandate_id):
         _url("mandate_read", mandate_id=mandate_id), timeout=TIMEOUT)))
 
 
+_mandate_id = None
+
+
+def set_mandate(mandate_id):
+    """The merchant only accepts trail entries from a run that holds a real
+    mandate. One run, one mandate, so remember it here rather than threading
+    it through two dozen call sites."""
+    global _mandate_id
+    _mandate_id = mandate_id
+
+
 def push_audit(trace_id, step, decision, reason="", amount_paise=None):
     try:
         requests.post(_url("audit_write"), timeout=TIMEOUT,
                       json={"trace_id": trace_id, "step": step,
                             "decision": decision, "reason": reason,
-                            "amount_paise": amount_paise})
+                            "amount_paise": amount_paise,
+                            "mandate_id": _mandate_id})
     except Exception:
         pass   # audit must never break the purchase

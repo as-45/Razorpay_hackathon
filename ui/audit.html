@@ -33,13 +33,16 @@
 <div id="out"></div>
 
 <script>
+// The merchant serves this page, so its own origin is the default.
+const MERCHANT = new URLSearchParams(location.search).get('merchant')
+                 || location.origin;
 async function load() {
   const id  = document.getElementById('trace').value.trim();
   const out = document.getElementById('out');
   if (!id) return;
   out.innerHTML = '<div class="empty">loading…</div>';
   try {
-    const res  = await fetch(`http://127.0.0.1:8000/audit/${id}`);
+    const res  = await fetch(`${MERCHANT}/audit/${id}`);
     const rows = await res.json();
     if (!rows.length) {
       out.innerHTML = '<div class="empty">no rows for that trace</div>';

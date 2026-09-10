@@ -50,7 +50,7 @@ def main():
         print(f"reason: {result['refusal_reason']}")
     if result.get("payment_url"):
         print(f"pay at: {result['payment_url']}")
-    print(f"\nmerchant trail: curl.exe http://127.0.0.1:8000/audit/{trace_id}")
+    print(f"\nmerchant trail: curl.exe {tools.BASE}/audit/{trace_id}")
 
 if __name__ == "__main__":
     main()

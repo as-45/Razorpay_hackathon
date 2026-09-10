@@ -1,3 +1,4 @@
+import difflib
 import re
 
 SUSPICIOUS = [
@@ -38,6 +39,49 @@ def validate_ids(selection, catalog):
     good  = [s for s in selection if s.get("id") in known]
     bad   = [s.get("id") for s in selection if s.get("id") not in known]
     return good, bad
+
+
+_WORD = re.compile(r"[^\wऀ-෿]+", re.UNICODE)
+
+# Words that carry no product meaning, so they never count as a match.
+_NOISE = {"a", "an", "the", "of", "one", "two", "some", "box", "boxes", "pack",
+          "packs", "tin", "tins", "bar", "bars", "piece", "pieces", "kg", "g",
+          "buy", "get", "order", "please", "want", "need", "me", "for", "and",
+          "under", "rs", "rupees", "sweet", "sweets"}
+
+
+def _tokens(text):
+    return {t for t in _WORD.split((text or "").lower()) if t and t not in _NOISE}
+
+
+def names_of(product):
+    """Every name this product answers to — its own, plus the catalog's
+    aliases. Matching is the catalog's job, not the model's memory."""
+    return [product.get("name", "")] + list(product.get("aliases") or [])
+
+
+def matches_request(requested, product):
+    """Does this product plausibly answer what the user asked for?"""
+    want = _tokens(requested)
+    if not want:
+        return False
+    for name in names_of(product):
+        have = _tokens(name)
+        if want & have:
+            return True
+        # "kaju katali" vs "kaju katli" — spelling drifts, meaning doesn't.
+        for w in want:
+            for h in have:
+                if difflib.SequenceMatcher(None, w, h).ratio() >= 0.85:
+                    return True
+    return False
+
+
+def products_matching(requested, catalog):
+    """Which catalog entries the user could have meant. Empty means the
+    request named nothing specific — 'something sweet' rather than
+    'mysore pak' — and any choice is fair game."""
+    return [p for p in catalog if matches_request(requested, p)]
 
 
 def validate_selection(selection, catalog, limit_paise=None, delivery_paise=0):

@@ -13,6 +13,7 @@ from webauthn.helpers.structs import PublicKeyCredentialDescriptor
 
 from .db import get_db
 from .models import Customer, Mandate
+from .mandate import sign
 from .audit import log
 
 router = APIRouter()
@@ -135,12 +136,19 @@ def mandate_complete(req: MandateComplete, db: Session = Depends(get_db)):
     CHALLENGES.pop(req.customer_id, None)
 
     mid = f"mnd_{uuid.uuid4().hex[:10]}"
+    expires = datetime.fromisoformat(req.expires_at)
     db.add(Mandate(
         id=mid, agent_id=req.agent_id,
         max_amount_paise=req.max_amount_paise,
         allowed_categories=req.allowed_categories,
-        expires_at=datetime.fromisoformat(req.expires_at),
-        signature=b64e(req.credential["response"]["signature"].encode()),
+        expires_at=expires,
+        # The device assertion proves a human approved this. The HMAC over
+        # the terms proves nobody edited them afterwards. A passkey mandate
+        # needs both, and is checked at order time exactly like any other.
+        signature=sign(req.agent_id, req.max_amount_paise,
+                       req.allowed_categories, expires.isoformat()),
+        passkey_signature=b64e(
+            req.credential["response"]["signature"].encode()),
         customer_id=req.customer_id))
     db.commit()
 

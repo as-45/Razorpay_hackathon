@@ -338,8 +338,21 @@ with left:
                 clicked = "n"
 
         else:
+            budget_line = ""
+            if ask.get("hold_id"):
+                budget_line += (
+                    f"\n\n🔒 Reserved as {ask['hold_id']} — this price is "
+                    f"held for {ask.get('hold_ttl_seconds', 0)}s and cannot "
+                    f"change while you decide.")
+            if ask.get("remaining_paise") is not None:
+                budget_line += (
+                    f"\n\nMandate budget: Rs "
+                    f"{ask['remaining_paise']/100:,.0f} available · "
+                    f"Rs {ask.get('left_after_paise', 0)/100:,.0f} left "
+                    f"after this")
             st.info(f"**{ask.get('summary')}**\n\n"
-                    f"Total: Rs {ask.get('total_paise', 0)/100:,.0f}")
+                    f"Total: Rs {ask.get('total_paise', 0)/100:,.0f}"
+                    + budget_line)
             c1, c2 = st.columns(2)
             if c1.button("Approve", type="primary",
                          use_container_width=True):

@@ -10,7 +10,15 @@ class ShopState(TypedDict, total=False):
     screened:       list           # after guards.py cleans it
     findings:       list           # suspicious content found
     allowed_categories: list
-    delivery_paise: int            # discovered from the merchant manifest  
+    delivery_paise: int            # discovered from the merchant manifest
+    spent_paise:     int           # already committed against this mandate
+    remaining_paise: int           # what the mandate has left to spend
+    hold_id:          Optional[str]  # basket reserved at a frozen price
+    hold_expires_at:  Optional[str]
+    hold_ttl_seconds: Optional[int]
+    hold_id:          Optional[str]  # basket reserved at a frozen price
+    hold_expires_at:  Optional[str]
+    hold_ttl_seconds: Optional[int]  
     selection:      list           # [{"id": "...", "qty": n}]
     quote:          dict           # merchant's authoritative total
 
