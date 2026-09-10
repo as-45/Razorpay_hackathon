@@ -100,6 +100,10 @@ Full diagrams, including the LangGraph-generated agent graph, are in
 - **The model's output is validated, not trusted.** Real id · whole quantity ≥ 1
   · within stock · basket within budget · *and it must plausibly be what the
   user asked for*, matched against the catalog's own names and aliases.
+- **A wrong model does not become a failed purchase.** When the request names a
+  product the catalog can identify with certainty, and that product is in stock,
+  allowed and affordable, the agent uses it — rather than asking a human about a
+  mistake only the model made.
 - **Product text is data, not instruction.** Reviews are screened for imperative
   patterns before the model sees them.
 - **Every mandate is signed, with no exceptions.** Passkey-approved mandates
@@ -134,6 +138,20 @@ A price alone doesn't let a machine choose well. Each product carries:
 **`aliases`** — a buyer says "cashew barfi"; the shelf says "Kaju katli". Matching
 belongs to the catalog, not to whichever model happens to know Indian sweets.
 **`cross_sell`** — what the shopkeeper would offer alongside. Declared, not inferred.
+
+### Two matchers, two jobs
+
+Names are matched twice, at different strictness, because the two questions are
+opposites:
+
+| | Question | Used for |
+|---|---|---|
+| **loose** | what *could* they have meant? | rejecting a substitution — deliberately generous |
+| **strict** | every word accounted for | choosing on the user's behalf — near-certainty |
+
+"gold leaf barfi" overlaps "Coconut barfi" on one word. Loose enough to refuse a
+substitution; nowhere near enough to make one. Getting this wrong turns the
+recovery above into the very behaviour it exists to prevent.
 
 ---
 
@@ -176,7 +194,8 @@ sweets-only mandate is still `403 category_blocked`.
 merchant_discovered  merchant   Sharma Sweets — 5 categories, delivery Rs 40
 catalog_served       merchant   20 products
 catalog_screened     agent      quarantined 1 suspicious review(s) - ['sw_008']
-items_selected       agent      shown 8 of 20, kept [{'id':'sw_001','qty':2}]
+items_selected       agent      refused substitutes ['sw_002']
+selection_recovered  agent      'kaju katli' matches Kaju katli in the catalog
 quote_issued         merchant   1 lines                              Rs 1640
 agent_precheck       agent      Rs 1640 within limits                Rs 1640
 upsell_offered       merchant   Gift wrap add-on Rs 40
@@ -187,6 +206,11 @@ mandate_verified     merchant   Rs 1640 within cap, Rs 360 left      Rs 1640
 order_created        merchant   ord_xxxxxxxxxx                       Rs 1640
 payment_captured     merchant   plink_xxxxxxxxxx                     Rs 1640
 ```
+
+That trail is a real run, including the mistake: a 7B model asked for kaju katli
+returned motichoor laddoo. The guard refused the swap, the catalog supplied the
+product the request actually named, and the purchase completed — the model being
+wrong never reached the buyer.
 
 ### 2 · A misbehaving agent, stopped by the merchant
 
@@ -260,7 +284,7 @@ no model required:**
 
 ```bash
 curl http://127.0.0.1:8000/.well-known/agent-catalog
-set TEST_BASE=http://127.0.0.1:8000 && pytest -q     # 43 tests
+set TEST_BASE=http://127.0.0.1:8000 && pytest -q     # 46 tests
 ```
 
 For the buyer agent you also need [Ollama](https://ollama.com):
@@ -303,11 +327,11 @@ from what is actually on the shelves.
 
 ## Tests
 
-**43 tests**, no mocks — they run against a live merchant.
+**46 tests**, no mocks — they run against a live merchant.
 
 ```
 tests/test_gate.py        9   the mandate gate, attacked directly, no agent involved
-tests/test_guards.py      9   injection screening, hallucinated ids, substitution
+tests/test_guards.py     12   injection screening, hallucinated ids, substitution, strict vs loose matching
 tests/test_inventory.py   6   stock movement, oversell, the two-agent race, the budget envelope
 tests/test_holds.py       6   reserve, release, spend once, price frozen
 tests/test_trust.py       5   audit forgery, mandate tampering, hold expiry

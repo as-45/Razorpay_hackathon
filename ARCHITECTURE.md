@@ -162,6 +162,25 @@ to substitute is a request, not a control.
 catalog fields rather than model knowledge, so "cashew barfi" and "ಕಾಜು ಕತ್ಲಿ"
 resolve without depending on which model happens to be reading.
 
+**Names are matched twice, at two strictnesses.** Deciding what a request
+*could* have meant and deciding what it *definitely* meant are opposite
+problems, and one matcher cannot serve both. The loose matcher is generous on
+purpose — it decides whether the model's pick is a plausible answer, so it can
+refuse a substitution. The strict matcher requires every meaningful word of the
+request to be accounted for, and only it is allowed to choose a product on the
+user's behalf. "gold leaf barfi" shares a word with "Coconut barfi": loose
+enough to reject a swap, nowhere near enough to make one. Using the loose
+matcher for both turns the recovery below into the very behaviour the guard
+exists to prevent — which it did, once, before the split.
+
+**A model error is not a failed purchase.** When the model returns something
+the guard refuses, the run is not over: if the request names a product the
+strict matcher can identify, and that product is in stock, allowed and
+affordable, the agent takes it and records why. There is nothing left to guess
+at that point, and asking a human to adjudicate a mistake only the model made
+is not a good use of their attention. If no product can be identified that
+confidently, the agent stops and says which constraint is in the way.
+
 **Product text is data, not instruction.** Reviews are screened for imperative
 patterns before reaching the model, and whatever survives is passed as
 explicitly untrusted content.
