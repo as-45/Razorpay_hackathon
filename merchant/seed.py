@@ -88,6 +88,30 @@ DETAIL = {
 }
 
 
+
+# What the shopkeeper offers alongside what. Declared by the merchant, not
+# inferred by anyone: gift wrap with anything giftable, a tin of milk sweets
+# with a box of dry ones, chikki for the children while they wait.
+CROSS_SELL = {
+    "sw_001": ["sw_007", "sw_017"],   # kaju katli  -> gift wrap, gulab jamun
+    "sw_002": ["sw_007"],
+    "sw_003": ["sw_007", "sw_011"],
+    "sw_004": ["sw_007", "sw_014"],
+    "sw_005": ["sw_011"],
+    "sw_006": ["sw_007"],             # dry fruit box -> gift wrap
+    "sw_008": ["sw_007"],
+    "sw_010": ["sw_011"],
+    "sw_012": ["sw_007"],
+    "sw_013": ["sw_007"],
+    "sw_014": ["sw_007"],
+    "sw_016": ["sw_007"],
+    "sw_017": ["sw_007"],
+    "sw_018": ["sw_011"],
+    "sw_020": ["sw_007"],
+}
+
+
+
 def _rebuild_if_stale():
     """A database written by an older version is missing the newer product
     columns, and SQLite will not add them to an existing table. Products
@@ -98,7 +122,7 @@ def _rebuild_if_stale():
     if not insp.has_table("products"):
         return
     have = {c["name"] for c in insp.get_columns("products")}
-    need = {"unit", "net_weight_g", "aliases", "variant_group", "variant_label"}
+    need = {"unit", "net_weight_g", "aliases", "variant_group","variant_label", "cross_sell"}
     if not need <= have:
         print("products table is from an older version — rebuilding it")
         Product.__table__.drop(engine)
@@ -113,9 +137,9 @@ def run():
         unit, grams, aliases, vgroup, vlabel = DETAIL.get(
             pid, ("box", None, [], None, None))
         db.add(Product(id=pid, name=name, price_paise=price, stock=stock,
-                       category=cat, description=desc, reviews=revs,
-                       unit=unit, net_weight_g=grams, aliases=aliases,
-                       variant_group=vgroup, variant_label=vlabel))
+                       category=cat, description=desc, reviews=revs,unit=unit, net_weight_g=grams,aliases=aliases,
+                       variant_group=vgroup, variant_label=vlabel,
+                       cross_sell=CROSS_SELL.get(pid, [])))
     db.commit()
     print(f"seeded {len(PRODUCTS)} products")
 

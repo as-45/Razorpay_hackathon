@@ -71,6 +71,21 @@ def supports_holds():
     return bool(discover().get("capabilities", {}).get("holds"))
 
 
+def supports_suggest():
+    return bool(discover().get("capabilities", {}).get("suggest"))
+
+
+def get_suggestions(trace_id, items):
+    """Ask the shop what it would offer alongside this basket."""
+    return _safe(lambda: _result(requests.post(
+        _url("suggest"), timeout=TIMEOUT,
+        json={"trace_id": trace_id, "items": items})))
+
+
+
+
+
+
 def create_hold(trace_id, items):
     """Ask the merchant to set these aside at today's price."""
     return _safe(lambda: _result(requests.post(

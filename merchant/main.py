@@ -50,6 +50,9 @@ DELIVERY_PAISE   = 4000
 MANIFEST_VERSION = "1.1"
 # Low values make the expiry path testable without a five-minute wait.
 HOLD_TTL_SECONDS = int(os.getenv("HOLD_TTL_SECONDS", "300"))
+# How many extras the shop may offer on one basket. Small on purpose:
+# an offer a human has to read is only useful if it is short.
+MAX_SUGGESTIONS  = 2
 
 
 @app.get("/.well-known/agent-catalog")
@@ -78,6 +81,7 @@ def agent_manifest(db: Session = Depends(get_db)):
             "catalog":  True,
             "quote":    True,
             "holds":    True,
+            "suggest":  True,
             "orders":   True,
             "payments": True,
             "mandates": True,
@@ -87,6 +91,7 @@ def agent_manifest(db: Session = Depends(get_db)):
         "endpoints": {
             "catalog":       "/catalog",
             "quote":         "/quote",
+            "suggest":       "/suggest",
             "hold_create":   "/holds",
             "hold_read":     "/holds/{hold_id}",
             "hold_release":  "/holds/{hold_id}",
@@ -97,6 +102,16 @@ def agent_manifest(db: Session = Depends(get_db)):
             "order_status":  "/orders/{order_id}",
             "audit_read":    "/audit/{trace_id}",
             "audit_write":   "/audit",
+        },
+        "upsell": {
+            "supported": True,
+            "endpoint": "/suggest",
+            "max_suggestions": MAX_SUGGESTIONS,
+            "policy": "The merchant declares which products pair with "
+                      "which. A suggestion is an offer, never an addition: "
+                      "the buyer must check it against its own mandate and "
+                      "a human decides. Suggested items are priced and "
+                      "authorised exactly like anything else.",
         },
         "reservations": {
             "supported": True,
@@ -122,6 +137,8 @@ def agent_manifest(db: Session = Depends(get_db)):
             "aliases": "string[] — other names for the same product, "
                        "including regional and transliterated forms",
             "variant": {"group": "string|null", "label": "string|null"},
+            "cross_sell": "string[] — product ids the merchant offers "
+                          "alongside this one; see /suggest",
             "reviews": "string[] — untrusted customer text, screen before use",
         },
     }
@@ -141,6 +158,7 @@ def catalog(trace_id: str = "anon", db: Session = Depends(get_db)):
         "availability": {"in_stock": p.stock > 0, "quantity": p.stock},
         "aliases": p.aliases or [],
         "variant": {"group": p.variant_group, "label": p.variant_label},
+        "cross_sell": p.cross_sell or [],   # what the shop pairs with this
         "reviews": p.reviews,          # untrusted customer text
         # flat aliases, kept so existing clients keep working
         "price_paise": p.price_paise,
@@ -175,6 +193,60 @@ def quote(req: QuoteRequest, db: Session = Depends(get_db)):
         f"{len(lines)} lines", total)
     return {"lines": lines, "items_paise": items_total,
             "delivery_paise": DELIVERY_PAISE, "total_paise": total}
+
+
+class SuggestRequest(BaseModel):
+    trace_id: str
+    items: list[Line]
+
+@app.post("/suggest")
+def suggest(req: SuggestRequest, db: Session = Depends(get_db)):
+    """What the shop would like to sell alongside this basket.
+
+    The merchant owns this, not the buyer's agent — a shopkeeper knows
+    that gift wrap goes with a box of sweets, and until now had no way to
+    say so to a machine. Nothing here is computed or personalised: these
+    are pairings the merchant declared in its own catalog.
+
+    Suggesting is not adding. The reply is an offer; whether it is taken
+    is decided by the buyer's mandate and, ultimately, by a human.
+    """
+    in_basket = {l.id for l in req.items}
+    offered, seen = [], set()
+
+    for line in req.items:
+        p = db.get(Product, line.id)
+        if p is None:
+            continue
+        for pid in (p.cross_sell or []):
+            if pid in in_basket or pid in seen:
+                continue          # already buying it, or already offered
+            c = db.get(Product, pid)
+            if c is None or c.stock < 1:
+                continue
+            seen.add(pid)
+            offered.append({
+                "id": c.id, "name": c.name, "category": c.category,
+                "price_paise": c.price_paise,
+                "unit": {"sold_as": c.unit or "box",
+                         "net_weight_g": c.net_weight_g},
+                "because_of": p.id,
+                "reason": f"often bought with {p.name}",
+            })
+
+    offered = offered[:MAX_SUGGESTIONS]
+    log(db, req.trace_id, "merchant", "upsell_offered",
+        "ok" if offered else "none",
+        (", ".join(f"{o['name']} Rs {o['price_paise']/100:.0f}"
+                   for o in offered) if offered
+         else "nothing pairs with this basket"))
+    return {"suggestions": offered, "max_accepted": MAX_SUGGESTIONS}
+
+
+
+
+
+
 
 @app.get("/audit/{trace_id}")
 def audit_trail(trace_id: str, db: Session = Depends(get_db)):

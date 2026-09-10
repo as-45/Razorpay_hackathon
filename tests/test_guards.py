@@ -55,3 +55,29 @@ def test_chikki_is_not_an_answer_to_mysore_pak():
 def test_a_vague_request_names_nothing_specific():
     """'something sweet' must not lock the agent to one product."""
     assert guards.products_matching("buy something sweet", CAT) == []
+
+
+def test_a_loose_word_match_is_not_enough_to_choose():
+    """'gold leaf barfi' overlaps 'Coconut barfi' on one word. Loose enough
+    to refuse a substitution, nowhere near enough to make one."""
+    coconut = {"id": "sw_003", "name": "Coconut barfi",
+               "aliases": ["nariyal barfi"]}
+    gold    = {"id": "sw_013", "name": "Gold leaf barfi",
+               "aliases": ["gold barfi"]}
+    assert guards.matches_request("gold leaf barfi", coconut) is True
+    assert guards.strongly_matches("gold leaf barfi", coconut) is False
+    assert guards.strongly_matches("gold leaf barfi", gold) is True
+
+
+def test_a_strong_match_survives_a_misspelling_and_an_alias():
+    kaju = {"id": "sw_001", "name": "Kaju katli",
+            "aliases": ["cashew barfi", "ಕಾಜು ಕತ್ಲಿ"]}
+    assert guards.strongly_matches("kaju katli", kaju) is True
+    assert guards.strongly_matches("kaju katali", kaju) is True   # misspelt
+    assert guards.strongly_matches("cashew barfi", kaju) is True  # alias
+    assert guards.strongly_matches("ಕಾಜು ಕತ್ಲಿ", kaju) is True
+
+
+def test_a_vague_request_matches_nothing_strongly():
+    kaju = {"id": "sw_001", "name": "Kaju katli", "aliases": []}
+    assert guards.strongly_matches("something sweet", kaju) is False

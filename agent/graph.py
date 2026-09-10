@@ -258,14 +258,40 @@ Reply with ONLY JSON: {{"items": [{{"id": "<exact id>", "qty": <number>}}]}}"""
         notes.append(f"rejected {r['id']}: {r['reason']}")
 
     if not good:
-        # Say WHY the thing they asked for isn't happening. "We know it,
-        # it costs more than you have left" is a different problem from
-        # "we don't stock it", and the human can act on the difference.
-        why = "the shop does not stock that"
         if substituted:
             notes.append(f"model tried to substitute {substituted} — refused")
-        if wanted:
-            named = wanted[0]
+
+        # The model failed, but the catalog did not: the request named a
+        # product, that product is on the shelf, allowed and affordable.
+        # There is nothing left to guess, so take it directly rather than
+        # bothering a human about a mistake only the model made.
+        shown  = {p["id"] for p in affordable}
+        strong = guards.products_strongly_matching(wanted_text,
+                                                   state["screened"])
+        viable = [p for p in strong
+                  if p["id"] in shown and p["stock"] >= want]
+        if viable:
+            pick = min(viable, key=lambda x: x["price_paise"])
+            tools.push_audit(
+                state["trace_id"], "selection_recovered", "ok",
+                f"model returned {substituted or 'nothing usable'}; "
+                f"'{wanted_text}' matches {pick['name']} in the catalog, "
+                f"so that was used instead")
+            return {**state, "selection": [{"id": pick["id"], "qty": want}],
+                    "notes": notes +
+                             [f"model did not return a usable choice — "
+                              f"matched '{wanted_text}' to {pick['name']} "
+                              f"from the catalog instead"]}
+
+        # Nothing viable. Say WHY: "we know it, it costs more than you have
+        # left" is a different problem from "we don't stock it", and a
+        # person can act on the difference.
+        why = "the shop does not stock that"
+        # Name the product they actually asked for, not merely one that
+        # shares a word with it.
+        named_pool = strong or wanted
+        if named_pool:
+            named = named_pool[0]
             cost = named["price_paise"] * want + fee
             if cost > limit:
                 why = (f"{named['name']} comes to Rs {cost/100:.0f} for "
@@ -276,6 +302,9 @@ Reply with ONLY JSON: {{"items": [{{"id": "<exact id>", "qty": <number>}}]}}"""
             elif named["category"] not in cats:
                 why = (f"{named['name']} is in '{named['category']}', "
                        f"which this mandate does not allow")
+            else:
+                why = (f"{named['name']} is available, but the agent could "
+                       f"not settle on a choice")
 
         cheapest = min(affordable, key=lambda x: x["price_paise"])
         tools.push_audit(state["trace_id"], "items_selected", "refused", why)
@@ -406,6 +435,67 @@ def precheck_cap(state: ShopState) -> ShopState:
             [f"agent precheck ok: Rs {total/100:.0f}"]}
 
 
+def consider_suggestions(state: ShopState) -> ShopState:
+    """The shop offers extras; the buyer decides whether they are even
+    showable.
+
+    An upsell is the one place where the merchant's interest and the
+    buyer's diverge, so the offer gets filtered the same way anything
+    else does: it must be inside the mandate's categories, in stock, and
+    it must still fit what the budget has left AFTER the basket already
+    quoted. Anything that fails is dropped without ever reaching the
+    human — nobody should be offered something they cannot take.
+
+    Nothing is added here. This only decides what may be shown.
+    """
+    if rogue() or not tools.supports_suggest():
+        return state
+
+    ok, payload = tools.get_suggestions(state["trace_id"], state["selection"])
+    if not ok:
+        return {**state, "notes": state["notes"] +
+                ["merchant had no suggestions to offer"]}
+
+    total     = state["quote"]["total_paise"]
+    remaining = state.get("remaining_paise", state["cap_paise"])
+    budget    = (state.get("parsed") or {}).get("budget_paise")
+    ceiling   = min(budget, remaining) if budget else remaining
+    headroom  = ceiling - total
+    cats      = state.get("allowed_categories", [])
+    by_id     = {p["id"]: p for p in state.get("screened", [])}
+
+    affordable, dropped = [], []
+    for s in payload.get("suggestions", []):
+        p = by_id.get(s["id"])
+        if p is None or p["stock"] < 1:
+            dropped.append(f"{s['name']}: out of stock")
+        elif p["category"] not in cats:
+            dropped.append(f"{s['name']}: '{p['category']}' is outside "
+                           f"this mandate")
+        elif s["price_paise"] > headroom:
+            dropped.append(f"{s['name']}: Rs {s['price_paise']/100:.0f} "
+                           f"would not fit the Rs {headroom/100:.0f} left")
+        else:
+            affordable.append({**s, "qty": 1})
+
+    notes = state["notes"]
+    if dropped:
+        notes = notes + [f"suggestions the budget could not take: "
+                         f"{'; '.join(dropped)}"]
+    if affordable:
+        offer = affordable[0]          # one at a time; a human has to read it
+        tools.push_audit(state["trace_id"], "upsell_shown", "ok",
+                         f"{offer['name']} Rs {offer['price_paise']/100:.0f} "
+                         f"— {offer['reason']}, fits the "
+                         f"Rs {headroom/100:.0f} left",
+                         offer["price_paise"])
+        return {**state, "suggestion": offer,
+                "notes": notes + [f"shop suggests {offer['name']} at "
+                                  f"Rs {offer['price_paise']/100:.0f} "
+                                  f"({offer['reason']})"]}
+    return {**state, "notes": notes}
+
+
 def take_hold(state: ShopState) -> ShopState:
     """Reserve the basket before troubling the human.
 
@@ -420,7 +510,15 @@ def take_hold(state: ShopState) -> ShopState:
                 ["merchant offers no reservations — price not guaranteed "
                  "while you decide"]}
 
-    ok, h = tools.create_hold(state["trace_id"], state["selection"])
+    # Reserve the suggested extra too. The human is about to be offered it,
+    # and an offer that might have sold out by the time they say yes is not
+    # much of an offer.
+    suggestion = state.get("suggestion")
+    items = list(state["selection"])
+    if suggestion:
+        items = items + [{"id": suggestion["id"], "qty": suggestion["qty"]}]
+
+    ok, h = tools.create_hold(state["trace_id"], items)
     if not ok:
         reason = f"could not reserve the basket: {h.get('detail', 'unknown')}"
         tools.push_audit(state["trace_id"], "hold", "refused", reason)
@@ -430,6 +528,8 @@ def take_hold(state: ShopState) -> ShopState:
     # The hold is also the first honest chance to check the merchant against
     # itself: it quoted one total a moment ago, it is charging another now.
     quoted = state["quote"]["total_paise"]
+    if suggestion:
+        quoted += suggestion["price_paise"]
     if h["total_paise"] != quoted:
         tools.release_hold(h["hold_id"])
         reason = (f"merchant quoted Rs {quoted/100:.0f} but the reservation "
@@ -467,13 +567,41 @@ def approval_gate(state: ShopState) -> ShopState:
     lines = ", ".join(f'{l["qty"]}x {l["name"]}' for l in state["quote"]["lines"])
     total     = state["quote"]["total_paise"]
     remaining = state.get("remaining_paise", state["cap_paise"])
-    answer = interrupt({"summary": lines,
-                        "total_paise": total,
-                        "remaining_paise": remaining,
-                        "left_after_paise": remaining - total,
-                        "hold_id": state.get("hold_id"),
-                        "hold_ttl_seconds": state.get("hold_ttl_seconds")})
-    if str(answer).strip().lower() not in ("y", "yes", "approve"):
+    s         = state.get("suggestion")
+
+    ask = {"summary": lines,
+           "total_paise": total,
+           "remaining_paise": remaining,
+           "left_after_paise": remaining - total,
+           "hold_id": state.get("hold_id"),
+           "hold_ttl_seconds": state.get("hold_ttl_seconds")}
+    if s:
+        # The offer is priced, checked and reserved. All that is left is a
+        # person deciding, which is the only way an upsell should happen.
+        ask["suggestion"] = {
+            "id": s["id"], "name": s["name"], "reason": s["reason"],
+            "price_paise": s["price_paise"],
+            "total_with_paise": total + s["price_paise"],
+            "left_after_with_paise": remaining - total - s["price_paise"]}
+
+    answer = interrupt(ask)
+    reply = str(answer).strip().lower()
+
+    if s and reply in ("addon", "y+addon", "approve_with"):
+        tools.push_audit(state["trace_id"], "upsell_accepted", "ok",
+                         f"user added {s['name']}", s["price_paise"])
+        return {**state, "approved": True, "accepted_suggestion": True,
+                "selection": state["selection"] +
+                             [{"id": s["id"], "qty": s["qty"]}],
+                "notes": state["notes"] +
+                         [f"user approved, and added {s['name']} at "
+                          f"Rs {s['price_paise']/100:.0f}"]}
+
+    if s and reply in ("y", "yes", "approve"):
+        tools.push_audit(state["trace_id"], "upsell_declined", "ok",
+                         f"user did not take {s['name']}", s["price_paise"])
+
+    if reply not in ("y", "yes", "approve"):
         tools.push_audit(state["trace_id"], "user_approval", "refused", "user declined")
         notes = drop_hold(state, "user declined")
         return {**state, "approved": False, "status": "refused",
@@ -486,6 +614,24 @@ def approval_gate(state: ShopState) -> ShopState:
 
 
 def execute_payment(state: ShopState) -> ShopState:
+    # The reservation covered the suggested extra too, in case the human
+    # wanted it. They didn't — so give it back and reserve just the basket
+    # before charging anyone. Nobody pays for an offer they declined.
+    if (state.get("suggestion") and not state.get("accepted_suggestion")
+            and state.get("hold_id")):
+        tools.release_hold(state["hold_id"])
+        tools.push_audit(state["trace_id"], "hold_rebuilt", "ok",
+                         "extra declined — re-reserving the basket alone")
+        ok, h = tools.create_hold(state["trace_id"], state["selection"])
+        if not ok:
+            reason = (f"could not re-reserve the basket after the extra was "
+                      f"declined: {h.get('detail', 'unknown')}")
+            tools.push_audit(state["trace_id"], "hold", "refused", reason)
+            return {**state, "status": "refused", "hold_id": None,
+                    "refusal_reason": reason,
+                    "notes": state["notes"] + [f"REFUSED: {reason}"]}
+        state = {**state, "hold_id": h["hold_id"]}
+
     # A retried request must not become a second order.
     key = f"{state['trace_id']}-order"
     ok, payload = tools.create_order(
@@ -546,7 +692,8 @@ def _after_offer(s):
     return "refuse" if s.get("status") == "refused" else "quote"
 
 def _after_quote(s):    return "refuse" if s.get("status") == "refused" else "precheck"
-def _after_precheck(s): return "refuse" if s.get("status") == "refused" else "hold"
+def _after_precheck(s): return "refuse" if s.get("status") == "refused" else "suggest"
+def _after_suggest(s):  return "refuse" if s.get("status") == "refused" else "hold"
 def _after_hold(s):     return "refuse" if s.get("status") == "refused" else "approval"
 def _after_approval(s): return "refuse" if s.get("status") == "refused" else "pay"
 def _after_pay(s):      return "refuse" if s.get("status") == "refused" else "confirm"
@@ -557,7 +704,7 @@ def build():
     for name, fn in [("parse", parse_intent), ("clarify", clarify_budget),("fetch", fetch_catalog),
                      ("screen", screen_content), ("select", select_items),("offer", offer_alternative),
                      ("quote", get_quote), ("precheck", precheck_cap),
-                     ("hold", take_hold),
+                     ("suggest", consider_suggestions), ("hold", take_hold),
                      ("approval", approval_gate), ("pay", execute_payment),
                      ("confirm", confirm), ("refuse", refuse)]:
         g.add_node(name, fn)
@@ -570,7 +717,8 @@ def build():
     g.add_conditional_edges("select",   _after_select,   ["quote", "offer", "refuse"])
     g.add_conditional_edges("offer", _after_offer, ["quote", "refuse"])
     g.add_conditional_edges("quote", _after_quote, ["precheck", "refuse"])
-    g.add_conditional_edges("precheck", _after_precheck, ["hold", "refuse"])
+    g.add_conditional_edges("precheck", _after_precheck, ["suggest", "refuse"])
+    g.add_conditional_edges("suggest", _after_suggest, ["hold", "refuse"])
     g.add_conditional_edges("hold", _after_hold, ["approval", "refuse"])
     g.add_conditional_edges("approval", _after_approval, ["pay", "refuse"])
     g.add_conditional_edges("pay",      _after_pay,      ["confirm", "refuse"])

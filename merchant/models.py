@@ -22,6 +22,10 @@ class Product(Base):
     # Same sweet, several sizes: one group, one label each.
     variant_group = Column(String, nullable=True)
     variant_label = Column(String, nullable=True)
+    # What the shopkeeper would offer alongside this — product ids the
+    # merchant itself declares. Not a recommender: the shop knows what
+    # goes with what, it just had no way to say so to a machine.
+    cross_sell    = Column(JSON, default=list)
 
 
 class Hold(Base):

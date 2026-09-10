@@ -350,15 +350,35 @@ with left:
                     f"{ask['remaining_paise']/100:,.0f} available · "
                     f"Rs {ask.get('left_after_paise', 0)/100:,.0f} left "
                     f"after this")
+            sug = ask.get("suggestion")
+            if sug:
+                budget_line += (
+                    f"\n\n🎁 The shop suggests **{sug['name']}** at Rs "
+                    f"{sug['price_paise']/100:,.0f} — {sug['reason']}. "
+                    f"With it: Rs {sug['total_with_paise']/100:,.0f}, "
+                    f"leaving Rs {sug['left_after_with_paise']/100:,.0f}.")
+
             st.info(f"**{ask.get('summary')}**\n\n"
                     f"Total: Rs {ask.get('total_paise', 0)/100:,.0f}"
                     + budget_line)
-            c1, c2 = st.columns(2)
-            if c1.button("Approve", type="primary",
-                         use_container_width=True):
-                clicked = "y"
-            if c2.button("Decline", use_container_width=True):
-                clicked = "n"
+
+            if sug:
+                c1, c2, c3 = st.columns(3)
+                if c1.button("Approve", type="primary",
+                             use_container_width=True):
+                    clicked = "y"
+                if c2.button(f"Add {sug['name'].split()[0].lower()}",
+                             use_container_width=True):
+                    clicked = "addon"
+                if c3.button("Decline", use_container_width=True):
+                    clicked = "n"
+            else:
+                c1, c2 = st.columns(2)
+                if c1.button("Approve", type="primary",
+                             use_container_width=True):
+                    clicked = "y"
+                if c2.button("Decline", use_container_width=True):
+                    clicked = "n"
 
         if clicked:
             with st.spinner("resuming"):

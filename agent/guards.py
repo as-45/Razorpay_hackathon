@@ -77,6 +77,38 @@ def matches_request(requested, product):
     return False
 
 
+def strongly_matches(requested, product):
+    """A much stricter test than matches_request.
+
+    matches_request is deliberately loose — it decides what the user
+    COULD have meant, so it can reject a substitution. Choosing a product
+    on the user's behalf needs the opposite: near-certainty. "gold leaf
+    barfi" overlaps "Coconut barfi" on one word, and picking the coconut
+    one would be the very substitution we refuse elsewhere.
+
+    So: every meaningful word of the request must be accounted for by one
+    of the product's names.
+    """
+    want = _tokens(requested)
+    if not want:
+        return False
+    for name in names_of(product):
+        have = _tokens(name)
+        if not have:
+            continue
+        unmatched = [w for w in want
+                     if w not in have
+                     and not any(difflib.SequenceMatcher(None, w, h).ratio()
+                                 >= 0.85 for h in have)]
+        if not unmatched:
+            return True
+    return False
+
+
+def products_strongly_matching(requested, catalog):
+    return [p for p in catalog if strongly_matches(requested, p)]
+
+
 def products_matching(requested, catalog):
     """Which catalog entries the user could have meant. Empty means the
     request named nothing specific — 'something sweet' rather than
