@@ -3,6 +3,7 @@ uvicorn[standard]
 sqlalchemy
 pydantic
 razorpay
+cryptography
 python-dotenv
 requests
 langgraph
