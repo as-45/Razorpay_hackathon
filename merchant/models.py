@@ -1,5 +1,6 @@
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, JSON, DateTime
+from sqlalchemy import (Column, String, Integer, JSON, DateTime, Text,
+                        UniqueConstraint)
 from .db import Base
 
 class Product(Base):
@@ -100,3 +101,49 @@ class Customer(Base):
     credential_id = Column(String, nullable=True)
     public_key    = Column(String, nullable=True)
     sign_count    = Column(Integer, default=0)
+
+
+class LedgerEntry(Base):
+    """One link in a mandate's chain.
+
+    `payload` holds the EXACT canonical bytes that were signed, as a string,
+    not a re-serialised object. Verification re-reads those bytes; it never
+    rebuilds them and hopes they come out identical. Round-tripping JSON
+    through a parser is where systems like this break.
+
+    The unique constraint on (mandate_id, seq) is the concurrency guard:
+    two appends racing for the same position, one row is written and the
+    other raises. Same idea as moving stock with a conditional UPDATE --
+    let the database decide, not the application.
+    """
+    __tablename__ = "ledger_entries"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    mandate_id = Column(String, index=True, nullable=False)
+    seq        = Column(Integer, nullable=False)
+    entry_type = Column(String, nullable=False)
+    payload    = Column(Text, nullable=False)     # canonical JSON, as signed
+    sigs       = Column(JSON, nullable=False)
+    entry_hash = Column(String, nullable=False, index=True)
+    prev       = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("mandate_id", "seq",
+                                       name="uq_chain_position"),)
+
+
+class KeyPair(Base):
+    """A key this merchant knows about.
+
+    `private_key` is null when we hold only the public half -- which is the
+    normal case for a user, whose private key lives in a phone's secure
+    element and never comes anywhere near this table.
+    """
+    __tablename__ = "keypairs"
+    kid         = Column(String, primary_key=True)
+    role        = Column(String, nullable=False)      # merchant | agent | user
+    alg         = Column(String, nullable=False, default="Ed25519")
+    public_key  = Column(String, nullable=False)
+    private_key = Column(String, nullable=True)
+    rp_id       = Column(String, nullable=True)       # WebAuthn keys only
+    origin      = Column(String, nullable=True)
+    created_at  = Column(DateTime, default=datetime.utcnow)

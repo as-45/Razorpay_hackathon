@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 from .models import Product, Mandate, Order, Hold
 from .mandate import sign, verify
-from . import inventory
+from . import inventory, ledger, chain
 
 from .db import get_db, Base, engine
 from .audit import log
@@ -194,7 +194,6 @@ def quote(req: QuoteRequest, db: Session = Depends(get_db)):
     return {"lines": lines, "items_paise": items_total,
             "delivery_paise": DELIVERY_PAISE, "total_paise": total}
 
-
 class SuggestRequest(BaseModel):
     trace_id: str
     items: list[Line]
@@ -241,11 +240,6 @@ def suggest(req: SuggestRequest, db: Session = Depends(get_db)):
                    for o in offered) if offered
          else "nothing pairs with this basket"))
     return {"suggestions": offered, "max_accepted": MAX_SUGGESTIONS}
-
-
-
-
-
 
 
 @app.get("/audit/{trace_id}")
@@ -363,9 +357,18 @@ class MandateRequest(BaseModel):
     max_amount_paise: int
     allowed_categories: list[str]
     valid_days: int = 7
+    # "hmac"   — a row with a signature over its terms. The original.
+    # "ledger" — an append-only chain of signed entries. The balance is
+    #            then computed by folding it, not read from a column.
+    mode: str = "hmac"
+    step_up: dict | None = None
+
 
 @app.post("/mandates")
 def issue_mandate(req: MandateRequest, db: Session = Depends(get_db)):
+    if req.mode not in ("hmac", "ledger"):
+        raise HTTPException(400, "mode must be 'hmac' or 'ledger'")
+
     mid = f"mnd_{uuid.uuid4().hex[:10]}"
     expires = datetime.utcnow() + timedelta(days=req.valid_days)
     sig = sign(req.agent_id, req.max_amount_paise,
@@ -378,8 +381,134 @@ def issue_mandate(req: MandateRequest, db: Session = Depends(get_db)):
     log(db, mid, "merchant", "mandate_issued", "ok",
         f"{req.agent_id} up to Rs {req.max_amount_paise/100:.0f}",
         req.max_amount_paise)
-    return {"mandate_id": mid, "expires_at": expires.isoformat(),
-            "max_amount_paise": req.max_amount_paise}
+
+    out = {"mandate_id": mid, "expires_at": expires.isoformat(),
+           "max_amount_paise": req.max_amount_paise, "mode": req.mode}
+    if req.mode == "hmac":
+        return out
+
+    # ── ledger mode: open the account with a signed GRANT ──
+    #
+    # Software keys, generated here. That is a demo shortcut and it is
+    # labelled as one: a real user's private key lives in a phone's secure
+    # element and is never transmitted. Because the entry names its own
+    # algorithm, swapping in a passkey later changes one field, not the
+    # design -- see PHONE_SIGNING_FLOW.md.
+    merchant_spec, merchant_priv = chain.merchant_key(db)
+    user_spec, user_priv = chain.mint_key(db, "user", commit=False)
+    agent_spec, agent_priv = chain.mint_key(db, "agent", commit=False)
+
+    body = ledger.grant_body(
+        holder=req.agent_id,
+        cap_paise=req.max_amount_paise,
+        categories=req.allowed_categories,
+        # Whole seconds, matching the shape entries use. The walk parses
+        # timestamps so a mismatch is harmless, but writing one format
+        # everywhere keeps the chain readable by eye.
+        expires_at=expires.replace(microsecond=0).isoformat() + "Z",
+        user_key=user_spec, holder_key=agent_spec,
+        merchant_keys=[merchant_spec],
+        step_up=req.step_up)
+
+    entry = ledger.build(mid, 0, None, ledger.GRANT, body)
+    ledger.sign(entry, "user", user_spec["kid"], user_priv)
+
+    try:
+        chain.append(db, mid, entry)
+    except chain.ChainError as exc:
+        raise HTTPException(400, f"grant_rejected: {exc.reason}")
+
+    log(db, mid, "merchant", "chain_opened", "ok",
+        f"GRANT entry 0, cap Rs {req.max_amount_paise/100:.0f}",
+        req.max_amount_paise)
+
+    out.update({
+        "chain_url": f"/mandates/{mid}/chain",
+        "append_url": f"/mandates/{mid}/entries",
+        "keys": {"user": user_spec, "agent": agent_spec,
+                 "merchant": merchant_spec},
+        "demo_only_private_keys": {"user": user_priv, "agent": agent_priv},
+        "warning": ("Private keys are returned here because this merchant "
+                    "generated them. A phone-held key is never transmitted; "
+                    "only its public half is registered."),
+    })
+    return out
+
+
+class EntryRequest(BaseModel):
+    entry: dict
+
+
+# Which entry types a caller may append here, and why the others cannot.
+#
+# A SPEND is the one that matters: letting anyone append one directly would
+# be a way around /orders, where stock, holds, idempotency and payment are
+# decided. Money leaves through the gate or it does not leave.
+POSTABLE = {ledger.DELEGATE, ledger.RETURN, ledger.REVOKE}
+NOT_POSTABLE = {
+    ledger.GRANT:  "a chain has one GRANT, written when the mandate is issued",
+    ledger.SPEND:  "a SPEND is created by POST /orders, which is where stock, "
+                   "holds and payment are decided",
+    ledger.REFUND: "a REFUND is issued by the merchant against an order",
+}
+
+
+@app.post("/mandates/{mandate_id}/entries")
+def append_entry(mandate_id: str, req: EntryRequest,
+                 db: Session = Depends(get_db)):
+    """Append one pre-signed DELEGATE, RETURN or REVOKE.
+
+    The merchant does not sign on the caller's behalf and does not fix up
+    anything it sends. The entry is stored only if the whole chain still
+    verifies with it on the end -- so every refusal here is the same
+    refusal an offline verifier would give later, in the same words.
+    """
+    if db.get(Mandate, mandate_id) is None:
+        raise HTTPException(404, "unknown_mandate")
+    if not chain.exists(db, mandate_id):
+        raise HTTPException(409, "mandate_is_not_ledger_backed")
+
+    kind = req.entry.get("type")
+    if kind in NOT_POSTABLE:
+        raise HTTPException(422, {"error": "entry_type_not_postable",
+                                  "reason": NOT_POSTABLE[kind]})
+    if kind not in POSTABLE:
+        raise HTTPException(422, {"error": "entry_rejected",
+                                  "reason": f"unknown entry type {kind!r}"})
+
+    try:
+        row = chain.append(db, mandate_id, req.entry)
+    except chain.ChainError as exc:
+        log(db, mandate_id, "merchant", "entry_refused", "refused", exc.reason)
+        raise HTTPException(422, {"error": "entry_rejected",
+                                  "reason": exc.reason,
+                                  "at_entry": exc.at_entry})
+
+    result = chain.state(db, mandate_id)
+    log(db, mandate_id, "merchant", "entry_appended", "ok",
+        f"{row.entry_type} at seq {row.seq}")
+    return {"mandate_id": mandate_id, "seq": row.seq,
+            "type": row.entry_type, "entry_hash": row.entry_hash,
+            "available_paise": result.available_paise,
+            "state": result.state}
+
+
+@app.get("/mandates/{mandate_id}/chain")
+def read_chain(mandate_id: str, db: Session = Depends(get_db)):
+    """The raw signed entries.
+
+    Not a balance this server computed and asks you to believe -- the
+    evidence, so you can compute it yourself. `python verify_chain.py`
+    against this output needs nothing from here but the bytes.
+    """
+    if db.get(Mandate, mandate_id) is None:
+        raise HTTPException(404, "unknown_mandate")
+    entries = chain.load(db, mandate_id)
+    if not entries:
+        raise HTTPException(409, "mandate_is_not_ledger_backed")
+    result = ledger.verify(entries)
+    return {"mandate_id": mandate_id, "entries": entries,
+            "verification": result.as_dict()}
 
 
 class OrderRequest(BaseModel):
@@ -387,6 +516,109 @@ class OrderRequest(BaseModel):
     mandate_id: str
     items: list[Line] | None = None   # either send items...
     hold_id: str | None = None        # ...or a hold you already took
+    # Ledger mandates only: the SPEND entry, already signed by the agent
+    # (and by the user, when the grant's step-up policy asks for it). The
+    # merchant adds its own signature and appends -- it never signs on the
+    # buyer's behalf.
+    spend_entry: dict | None = None
+
+
+def _refusal_code(reason):
+    """Turn the walk's sentence into the refusal code callers already know.
+
+    The wording stays as the reason; only the code is translated, so the
+    existing agent and the existing tests keep seeing category_blocked and
+    envelope_exhausted rather than a new vocabulary.
+    """
+    r = (reason or "").lower()
+    if "allowlist" in r:                              return "category_blocked"
+    if "overdraw" in r or "above the cap" in r:       return "envelope_exhausted"
+    if "expired" in r:                                return "mandate_expired"
+    if "revoke" in r:                                 return "mandate_revoked"
+    if "step-up" in r:                                return "approval_required"
+    if "signature" in r:                              return "bad_signature"
+    return "chain_invalid"
+
+
+def authorise_on_chain(db, m, req, lines, total, categories, refuse):
+    """Check a purchase against the mandate's chain and sign the entry.
+
+    Where the HMAC path asks the database three questions, this asks the
+    chain one: would the chain still verify with this SPEND on the end?
+    Cap, envelope, categories, expiry, revocation and the step-up policy
+    are all answered by that single question, in the same code an outsider
+    runs offline.
+
+    Returns the entry with the merchant's signature added, ready to append.
+    """
+    entry = req.spend_entry
+    if not entry:
+        refuse("spend_entry_required",
+               "this mandate is ledger-backed; POST /orders needs a SPEND "
+               "entry signed by the agent", total)
+
+    if entry.get("type") != ledger.SPEND:
+        refuse("not_a_spend", f"entry type is {entry.get('type')!r}", total)
+    if entry.get("mandate_id") != m.id:
+        refuse("wrong_mandate", "entry names a different mandate", total)
+
+    prev, seq = chain.head(db, m.id)
+    if entry.get("seq") != seq or entry.get("prev") != prev:
+        refuse("stale_entry",
+               f"entry is built on position {entry.get('seq')}, but the chain "
+               f"is at {seq} -- fetch the chain again and re-sign", total)
+
+    body = entry.get("body") or {}
+
+    # The agent signed an amount. The merchant computed one. If they differ,
+    # nobody gets to decide which is right -- the order simply does not
+    # happen. This is the merchant-deviation check, made cryptographic:
+    # a shop cannot reprice between the quote and the charge, because the
+    # signature it needs covers the old number.
+    if body.get("amount_paise") != total:
+        refuse("amount_mismatch",
+               f"entry says Rs {(body.get('amount_paise') or 0)/100:.0f}, "
+               f"this basket costs Rs {total/100:.0f}", total)
+
+    # The categories in the entry are what the walk checks against the
+    # allowlist, so they have to be the basket's real ones. Otherwise an
+    # agent could buy electronics while writing "sweets" on the receipt.
+    if set(body.get("categories") or []) != set(categories):
+        refuse("category_mismatch",
+               f"entry declares {sorted(body.get('categories') or [])}, "
+               f"basket is {sorted(categories)}", total)
+
+    if (body.get("hold_id") or None) != (req.hold_id or None):
+        refuse("hold_mismatch", "entry names a different hold", total)
+
+    order_id = body.get("order_id")
+    if not isinstance(order_id, str) or not 1 <= len(order_id) <= 64:
+        refuse("bad_order_id", "the entry must name an order id", total)
+    if db.get(Order, order_id) is not None:
+        refuse("duplicate_order", f"order {order_id} already exists", total)
+
+    # Countersign FIRST, then dry-run. A SPEND requires the merchant's
+    # signature, so verifying before adding it always fails with "missing
+    # signature from merchant" -- which would hide every real reason
+    # behind a misleading one.
+    merchant_spec, merchant_priv = chain.merchant_key(db)
+    signed = dict(entry)
+    signed["sigs"] = list(entry.get("sigs") or [])
+    ledger.sign(signed, "merchant", merchant_spec["kid"], merchant_priv)
+
+    # Would the chain still verify with this on the end?
+    #
+    # This is an early exit, not the guard: chain.append re-runs the same
+    # walk inside the transaction, and that is what actually makes a bad
+    # entry unstorable. Deleting these lines changes no outcome -- a
+    # mutation test confirmed every case still refuses, with the same code.
+    # It earns its place by refusing before stock moves, so a doomed order
+    # never reserves and releases a box another buyer wanted in between.
+    trial = ledger.verify(chain.load(db, m.id) + [signed])
+    if not trial.valid:
+        refuse(_refusal_code(trial.reason), trial.reason, total)
+
+    return signed
 
 
 def mandate_spent(db, mandate_id):
@@ -450,22 +682,36 @@ def create_order(req: OrderRequest,
         raise HTTPException(400, "need_items_or_hold")
 
     # ── authorization ──
-    if total > m.max_amount_paise:
-        refuse("exceeds_cap",
-               f"Rs {total/100:.0f} over cap Rs {m.max_amount_paise/100:.0f}",
-               total)
+    #
+    # Two paths, one decision. An HMAC mandate is checked against the
+    # database; a ledger-backed one is checked by folding its chain. The
+    # ledger path is authoritative for mandates that have one -- there is
+    # no fallback to the SQL sum, because a second opinion is exactly what
+    # a tamper-evident record must not have.
+    on_chain = chain.exists(db, m.id)
+    signed_entry = None
 
-    spent = mandate_spent(db, m.id)
-    if spent + total > m.max_amount_paise:
-        refuse("envelope_exhausted",
-               f"Rs {total/100:.0f} would take mandate {m.id} to "
-               f"Rs {(spent + total)/100:.0f} of its "
-               f"Rs {m.max_amount_paise/100:.0f} budget "
-               f"(Rs {spent/100:.0f} already committed)", total)
+    if on_chain:
+        signed_entry = authorise_on_chain(db, m, req, lines, total,
+                                          categories, refuse)
+        spent = chain.state(db, m.id).spent_paise
+    else:
+        if total > m.max_amount_paise:
+            refuse("exceeds_cap",
+                   f"Rs {total/100:.0f} over cap Rs {m.max_amount_paise/100:.0f}",
+                   total)
 
-    blocked = categories - set(m.allowed_categories)
-    if blocked:
-        refuse("category_blocked", f"not allowed: {', '.join(blocked)}")
+        spent = mandate_spent(db, m.id)
+        if spent + total > m.max_amount_paise:
+            refuse("envelope_exhausted",
+                   f"Rs {total/100:.0f} would take mandate {m.id} to "
+                   f"Rs {(spent + total)/100:.0f} of its "
+                   f"Rs {m.max_amount_paise/100:.0f} budget "
+                   f"(Rs {spent/100:.0f} already committed)", total)
+
+        blocked = categories - set(m.allowed_categories)
+        if blocked:
+            refuse("category_blocked", f"not allowed: {', '.join(blocked)}")
 
     # ── take the stock, if a hold hasn't already ──
     if hold is None:
@@ -481,17 +727,44 @@ def create_order(req: OrderRequest,
         f"Rs {(m.max_amount_paise - spent - total)/100:.0f} left after this",
         total)
 
-    oid = f"ord_{uuid.uuid4().hex[:10]}"
+    # On a ledger mandate the buyer named the order when it signed the
+    # entry, so the id comes from there. The signature covers that id,
+    # which is what ties the money in the chain to this exact order.
+    oid = (signed_entry["body"]["order_id"] if signed_entry
+           else f"ord_{uuid.uuid4().hex[:10]}")
+
     db.add(Order(id=oid, mandate_id=m.id, trace_id=req.trace_id,
                  items=lines, total_paise=total,
                  hold_id=hold.id if hold else None,
                  idempotency_key=idempotency_key))
     if hold is not None:
         hold.status = "consumed"
+
+    # One transaction: the order exists, the hold is spent, and the ledger
+    # records it -- or none of those things happened. An order without its
+    # entry would be money spent with no record, which is the single
+    # failure this whole design exists to prevent.
+    if signed_entry is not None:
+        try:
+            chain.append(db, m.id, signed_entry, commit=False)
+        except chain.ChainError as exc:
+            db.rollback()
+            if hold is None:
+                inventory.release(
+                    db, [{"id": l["id"], "qty": l["qty"]} for l in lines])
+            refuse(_refusal_code(exc.reason), exc.reason, total)
+
     db.commit()
     log(db, req.trace_id, "merchant", "order_created", "ok", oid, total)
-    return {"order_id": oid, "total_paise": total, "lines": lines,
-            "reused": False}
+
+    out = {"order_id": oid, "total_paise": total, "lines": lines,
+           "reused": False}
+    if signed_entry is not None:
+        after = chain.state(db, m.id)
+        out.update({"entry_seq": signed_entry["seq"],
+                    "entry_hash": ledger.entry_hash(signed_entry),
+                    "remaining_paise": after.available_paise})
+    return out
 
 
 
@@ -550,7 +823,6 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
             "total_paise": o.total_paise, "items": o.items,
             "payment_url": o.payment_url}
 
-
 class AuditRequest(BaseModel):
     trace_id: str
     step: str
@@ -565,8 +837,9 @@ def write_audit(req: AuditRequest, db: Session = Depends(get_db)):
 
     That is useful — half the story happens on the agent's side — but it
     means the trail carries entries the merchant did not author. Require a
-    real mandate, so a line can only be added to a purchase someone was
-    actually authorised to attempt.
+    real mandate, so a line can only be added to a purchase that someone
+    was actually authorised to attempt, and label the actor accordingly so
+    a reader can tell merchant fact from agent claim.
     """
     if not req.mandate_id or db.get(Mandate, req.mandate_id) is None:
         raise HTTPException(403, "audit_requires_mandate")
@@ -586,9 +859,29 @@ def read_mandate(mandate_id: str, db: Session = Depends(get_db)):
     m = db.get(Mandate, mandate_id)
     if m is None:
         raise HTTPException(404, "unknown_mandate")
-    spent = mandate_spent(db, m.id)
-    return {"mandate_id": m.id, "max_amount_paise": m.max_amount_paise,
-            "spent_paise": spent,
-            "remaining_paise": max(0, m.max_amount_paise - spent),
-            "allowed_categories": m.allowed_categories,
-            "expires_at": m.expires_at.isoformat(), "status": m.status}
+
+    out = {"mandate_id": m.id, "max_amount_paise": m.max_amount_paise,
+           "allowed_categories": m.allowed_categories,
+           "expires_at": m.expires_at.isoformat(), "status": m.status}
+
+    if not chain.exists(db, m.id):
+        spent = mandate_spent(db, m.id)
+        out.update({"mode": "hmac", "spent_paise": spent,
+                    "remaining_paise": max(0, m.max_amount_paise - spent)})
+        return out
+
+    # Ledger-backed: these numbers are folded from signed entries, and the
+    # caller can check them by fetching the chain and folding it too.
+    r = chain.state(db, m.id)
+    out.update({
+        "mode": "ledger",
+        "chain_url": f"/mandates/{m.id}/chain",
+        "chain_valid": r.valid,
+        "chain_reason": r.reason,
+        "entries": r.entries,
+        "spent_paise": r.spent_paise,
+        "delegated_paise": r.delegated_paise,
+        "remaining_paise": r.available_paise,
+        "status": r.state if r.valid else m.status,
+    })
+    return out

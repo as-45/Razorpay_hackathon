@@ -107,6 +107,27 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def parse_ts(s):
+    """ISO-8601 to a comparable datetime, or None if it is not one.
+
+    Timestamps must never be compared as text. "2026-09-20T13:14:55Z" is
+    0.74 seconds EARLIER than "2026-09-20T13:14:55.748130Z", but sorts
+    after it, because 'Z' is 90 and '.' is 46 -- so a purchase made just
+    before expiry would be refused as expired. Whether a writer happened
+    to include microseconds is not allowed to change the answer.
+    """
+    if not isinstance(s, str):
+        return None
+    text = s.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def build(mandate_id, seq, prev, type_, body, at=None):
     """An entry with no signatures yet. Sign it, then append it."""
     if type_ not in TYPES:
@@ -405,6 +426,9 @@ def verify(entries, user_pub=None, extra_keys=None):
     cap = int(grant.get("cap_paise", 0))
     allowed_categories = set(grant.get("categories") or [])
     expires_at = grant.get("expires_at")
+    expires_dt = parse_ts(expires_at) if expires_at else None
+    if expires_at and expires_dt is None:
+        return _bad("the grant's expires_at is not a valid timestamp", 0)
 
     available = cap
     spent = delegated = since_approval = 0
@@ -441,17 +465,19 @@ def verify(entries, user_pub=None, extra_keys=None):
         # ── state and time ──
         if state != "open":
             return _bad(f"entry follows a REVOKE, which closes the chain", i)
-        at = e.get("at")
-        if not isinstance(at, str):
-            return _bad("timestamp is missing", i)
+        at = parse_ts(e.get("at"))
+        if at is None:
+            return _bad("timestamp is missing or not a valid ISO-8601 time", i)
         if last_at is not None and at < last_at:
             return _bad("timestamp moves backwards", i)
-        if expires_at and at > expires_at and e["type"] not in (REVOKE, REFUND, RETURN):
+        if (expires_dt and at > expires_dt
+                and e["type"] not in (REVOKE, REFUND, RETURN)):
             return _bad("entry is dated after the grant expired", i)
 
         # ── signatures ──
         required = set(REQUIRED_ROLES[e["type"]])
-        if step_up_required(grant, e, since_approval):
+        stepped_up = step_up_required(grant, e, since_approval)
+        if stepped_up:
             required.add("user")
 
         present = {}
@@ -472,9 +498,13 @@ def verify(entries, user_pub=None, extra_keys=None):
 
         missing = required - set(present)
         if missing:
-            if "user" in missing and e["type"] == SPEND:
-                return _bad("this purchase required approval under the signed "
-                            "step-up policy and carries no user signature", i)
+            # Say WHY a user signature was wanted. "missing signature from
+            # user" on a DELEGATE is baffling until you know the grant's own
+            # policy asked for one.
+            if "user" in missing and stepped_up:
+                return _bad(f"this {e['type']} required approval under the "
+                            "signed step-up policy and carries no user "
+                            "signature", i)
             return _bad(f"missing signature from {', '.join(sorted(missing))}", i)
 
         allowed_roles = required | {"user"}          # a bonus user sig is fine
@@ -572,7 +602,7 @@ def verify(entries, user_pub=None, extra_keys=None):
         if e["type"] == REVOKE:
             state, available = "revoked", 0
 
-        prev, last_at = entry_hash(e), at
+        prev, last_at = entry_hash(e), at    # `at` is a datetime here
 
     return Result(True, cap_paise=cap, spent_paise=spent,
                   delegated_paise=delegated, available_paise=available,

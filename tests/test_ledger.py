@@ -277,6 +277,52 @@ def test_spending_after_expiry_is_caught(chain, agent, merchant):
     assert "expired" in r.reason
 
 
+def test_microseconds_do_not_decide_whether_a_purchase_is_expired(
+        user, agent, merchant):
+    """Found in a live response, not by a test.
+
+    The merchant wrote expires_at with microseconds and entries without
+    them. Compared as text, "…13:14:55Z" sorts AFTER "…13:14:55.748130Z"
+    because 'Z' is 90 and '.' is 46 -- so a purchase made 0.74 seconds
+    BEFORE expiry was judged expired. Timestamps are parsed now.
+    """
+    c = [make_grant(user, agent, merchant)]
+    c[0]["sigs"] = []
+    c[0]["body"]["expires_at"] = "2026-09-20T13:14:55.748130Z"
+    user.sign(c[0])
+    add_spend(c, agent, merchant, 1000, at="2026-09-20T13:14:55Z")
+    r = L.verify(c)
+    assert r.valid, r.reason
+
+
+def test_an_entry_after_expiry_is_still_caught_with_mixed_formats(
+        user, agent, merchant):
+    c = [make_grant(user, agent, merchant)]
+    c[0]["sigs"] = []
+    c[0]["body"]["expires_at"] = "2026-09-20T13:14:55.748130Z"
+    user.sign(c[0])
+    add_spend(c, agent, merchant, 1000, at="2026-09-20T13:14:56Z")
+    assert "expired" in L.verify(c).reason
+
+
+def test_timestamps_compare_by_time_not_by_text(user, agent, merchant):
+    """Same instant, two spellings, and one offset form. All equivalent."""
+    assert (L.parse_ts("2026-09-20T13:14:55Z")
+            == L.parse_ts("2026-09-20T13:14:55+00:00"))
+    assert (L.parse_ts("2026-09-20T13:14:55.000000Z")
+            == L.parse_ts("2026-09-20T13:14:55Z"))
+    assert (L.parse_ts("2026-09-20T13:14:55Z")
+            < L.parse_ts("2026-09-20T13:14:55.748130Z"))
+    assert L.parse_ts("not a time") is None
+    assert L.parse_ts(None) is None
+
+
+def test_a_nonsense_timestamp_is_refused(chain, agent, merchant):
+    add_spend(chain, agent, merchant, 100, order_id="ord_2",
+              at="whenever, honestly")
+    assert "not a valid ISO-8601" in L.verify(chain).reason
+
+
 def test_a_category_outside_the_grant_is_caught(chain, agent, merchant):
     add_spend(chain, agent, merchant, 100, order_id="ord_2",
               categories=["electronics"])
